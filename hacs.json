@@ -1,3 +1,5 @@
 {
-  "name": "Home Assistant 3D Floorplan"
+  "name": "Home Assistant 3D Floorplan",
+  "filename": "Home-Assistant-3D-Floorplan.js",
+  "render_readme": true
 }

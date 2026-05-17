@@ -1,6 +1,6 @@
 # Home Assistant 3D Floorplan
 
-![Home Assistant 3D Floorplan preview](assets/3D_Floorplan.png)
+![Home Assistant 3D Floorplan preview](assets/preview.png)
 
 A Lovelace custom card for placing Home Assistant entities directly on a 3D model. The active workflow is 3D-only: load a `.glb`, switch to Edit Mode, select an entity from the sidebar, then click the model to save the marker at the clicked 3D coordinate.
 

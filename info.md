@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/Hollako/Home-Assistant-3D-Floorplan/main/assets/3D_Floorplan.png" alt="Home Assistant 3D Floorplan preview">
+![Home Assistant 3D Floorplan preview](https://raw.githubusercontent.com/Hollako/Home-Assistant-3D-Floorplan/main/assets/3D_Floorplan.png)
 
 # Home Assistant 3D Floorplan
 

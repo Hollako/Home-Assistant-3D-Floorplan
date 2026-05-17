@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"C:\\\\Users\\\\L\\\\Documents\\\\GitHub\\\\Home Assistant 3D Floorplan\" log --oneline -5)"
+    ]
+  }
+}

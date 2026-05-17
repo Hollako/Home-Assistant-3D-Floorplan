@@ -1,0 +1,28 @@
+title: 3D Floorplan
+views:
+  - title: Floorplan
+    path: floorplan
+    icon: mdi:floor-plan
+    cards:
+      - type: custom:home-assistant-3d-floorplan
+        title: 3D Floorplan
+        model: /local/floorplans/home.glb
+        view_mode: "3d"
+        markers: []
+
+  - title: Multi Model
+    path: multi-model
+    icon: mdi:home-floor-1
+    cards:
+      - type: custom:home-assistant-3d-floorplan
+        title: Home Floorplan
+        view_mode: "3d"
+        floors:
+          - id: ground
+            name: Ground Floor
+            model: /local/floorplans/ground-floor.glb
+            markers: []
+          - id: first
+            name: First Floor
+            model: /local/floorplans/first-floor.glb
+            markers: []

@@ -95,6 +95,12 @@ markers:
     z: -3.4200
 ```
 
+Temperature and humidity `sensor.*` markers show their live value on the marker by default. In Edit Mode, use **Marker display** to keep Auto behavior or force a marker to show either its icon or value. The exported YAML stores this override as:
+
+```yaml
+marker_display: value # auto when omitted, or icon/value
+```
+
 ## Brightness Areas
 
 Edit Mode can define room brightness areas. Press **Add Area**, then **Draw**, and click the room corners on the 3D model. Any placed `light.*` marker inside that polygon contributes to the area's glow: off lights add no glow, lights without a brightness attribute count as fully on, and dimmable lights use their `brightness` value multiplied by the marker's `light_intensity` percentage.
@@ -107,6 +113,11 @@ brightness_zones:
     name: Kids Room
     color: "#f8d66d"
     height: 0.8500
+    day_opacity: 0.50
+    night_opacity: 1.00
+    illuminance_enabled: true
+    illuminance_entity: sensor.kids_room_illuminance
+    show_lux: true
     points:
       - x: 1.2400
         y: -3.4200
@@ -116,13 +127,11 @@ brightness_zones:
         y: -6.2000
 ```
 
-Ambient darkness is dynamic by default. The card reads `sun.sun`: during the day unlit areas are only lightly shaded, and at night unlit areas get stronger wall/floor shading plus a mid-height shade above furniture. You can tune or disable it:
+Each brightness area has its own day and night shade values. The defaults are `day_opacity: 0.50` and `night_opacity: 1.00`. If `illuminance_enabled` is true and the configured sensor has a numeric lux value, the room shade is calculated dynamically: low lux moves toward the night shade, `300 lux` reaches the configured day shade, and brighter readings keep reducing the shade proportionally toward `0`. If `show_lux` is true, the room shows its live lux value on the 3D floorplan, and Edit Mode also shows the applied shade value. If illuminance is disabled or unavailable, the card falls back to `sun.sun` day/night state.
 
 ```yaml
 ambient_darkness:
   entity: sun.sun
-  day_opacity: 0.50
-  night_opacity: 1.00
 ```
 
 ## Multiple Floors Or Models

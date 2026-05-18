@@ -151,6 +151,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     }
     if (this._shouldPreserveModelViewer()) {
       this._refresh3DMarkerOverlay();
+      this._refresh3DZoneOverlay();
       this._refreshOfflineAlert();
       return;
     }
@@ -266,6 +267,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       const name = stateObj.attributes?.friendly_name || entity?.name || entity?.original_name || entityId;
       const icon = stateObj.attributes?.icon || "";
       const deviceClass = stateObj.attributes?.device_class || "";
+      const unit = stateObj.attributes?.unit_of_measurement || "";
 
       rows.push({
         key: entityId,
@@ -282,6 +284,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         icons: icon ? [icon] : [],
         deviceClasses: deviceClass ? [deviceClass] : [],
         primaryState: stateObj.state,
+        unit,
         primaryDomain: domain,
         primaryDeviceClass: deviceClass,
         offlineEntities: isOffline ? [{ entityId, name }] : [],
@@ -498,6 +501,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         entityId: marker.entity || key,
         name: marker.name || "",
         icon: marker.icon || "",
+        markerDisplay: this._normalizeMarkerDisplay(marker.marker_display || marker.markerDisplay),
         tapAction: this._normalizeMarkerAction(marker.tap_action || marker.tapAction, "tap"),
         holdAction: this._normalizeMarkerAction(marker.hold_action || marker.holdAction, "hold"),
         lightIntensity: this._normalizeLightIntensity(marker.light_intensity ?? marker.lightIntensity),
@@ -523,6 +527,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         entityId,
         name: marker.name || "",
         icon: marker.icon || "",
+        markerDisplay: this._normalizeMarkerDisplay(marker.markerDisplay || marker.marker_display),
         tapAction: this._normalizeMarkerAction(marker.tapAction || marker.tap_action, "tap"),
         holdAction: this._normalizeMarkerAction(marker.holdAction || marker.hold_action, "hold"),
         lightIntensity: this._normalizeLightIntensity(marker.lightIntensity ?? marker.light_intensity),
@@ -619,6 +624,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         name: zone.name || `Area ${index + 1}`,
         color: zone.color || "#f8d66d",
         height: this._zoneHeight(zone),
+        dayOpacity: this._zoneOpacityValue(zone.day_opacity ?? zone.dayOpacity, 0.5),
+        nightOpacity: this._zoneOpacityValue(zone.night_opacity ?? zone.nightOpacity, 1),
+        illuminanceEnabled: zone.illuminance_enabled === true || zone.illuminanceEnabled === true || Boolean(zone.illuminance?.enabled),
+        illuminanceEntity: zone.illuminance_entity || zone.illuminanceEntity || zone.illuminance?.entity || "",
+        showLux: zone.show_lux === true || zone.showLux === true || zone.illuminance?.show_lux === true,
         points: (zone.points || []).map((point) => this._zoneDisplayPointToModel(point)),
       };
       return zones;
@@ -762,6 +772,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         name: zone.name || `Area ${index + 1}`,
         color: zone.color || "#f8d66d",
         height: this._zoneHeight(zone),
+        dayOpacity: this._zoneOpacityValue(zone.dayOpacity ?? zone.day_opacity, 0.5),
+        nightOpacity: this._zoneOpacityValue(zone.nightOpacity ?? zone.night_opacity, 1),
+        illuminanceEnabled: zone.illuminanceEnabled === true || zone.illuminance_enabled === true || Boolean(zone.illuminance?.enabled),
+        illuminanceEntity: zone.illuminanceEntity || zone.illuminance_entity || zone.illuminance?.entity || "",
+        showLux: zone.showLux === true || zone.show_lux === true || zone.illuminance?.show_lux === true,
         points,
       };
       return result;
@@ -789,8 +804,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   }
 
   _zoneOpacity(zone = {}, mode) {
-    const ambient = this._ambientDarknessConfig();
-    return Math.max(0, Math.min(1, mode === "night" ? ambient.night_opacity : ambient.day_opacity));
+    return mode === "night" ? this._zoneOpacityValue(zone.nightOpacity ?? zone.night_opacity, 1) : this._zoneOpacityValue(zone.dayOpacity ?? zone.day_opacity, 0.5);
+  }
+
+  _zoneOpacityValue(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.min(1, Number(number.toFixed(4)))) : fallback;
   }
 
   _zoneShadeHeight(zone = {}) {
@@ -1002,6 +1021,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                 ? `
             <div class="model-viewer ${isEditing ? "editable" : ""}" data-model-viewer data-model-url="${this._escape(activeModel)}">
               <div class="model-marker-layer" data-model-marker-layer></div>
+              <div class="model-zone-label-layer" data-zone-label-layer></div>
               <div class="model-zone-point-layer" data-zone-point-layer></div>
               ${isEditing ? `<div class="selected-marker-panel" data-selected-marker-panel>${this._selectedMarkerPanel()}</div>` : ""}
               <div class="model-status" data-model-status>${isEditing ? "Select an entity, then click the 3D model to place it." : "Loading 3D model..."}</div>
@@ -1261,6 +1281,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         this._markers[key].icon = value === "auto" ? "" : value;
         this._saveMarkers();
         this._refresh3DMarkerOverlay();
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-marker-display]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        this._updateMarkerDisplay(event.currentTarget.dataset.markerDisplay, event.currentTarget.value);
       });
     });
 
@@ -1970,7 +1997,6 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     }
 
     return `
-      ${this._ambientDarknessTemplate()}
       <label>
         <span>Area</span>
         <select data-zone-select>
@@ -1990,6 +2016,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         <span>Height</span>
         <input data-zone-height="${this._escape(activeZone.id)}" type="number" step="0.01" value="${this._escape(this._formatCoordinate(this._zoneHeight(activeZone)))}" />
       </label>
+      ${this._zoneShadeTemplate(activeZone)}
       <div class="zone-actions">
         <button type="button" data-zone-draw="${this._escape(activeZone.id)}">${this._zoneDrawing && this._activeZoneId === activeZone.id ? "Stop Drawing" : "Draw"}</button>
         <button type="button" data-zone-clear="${this._escape(activeZone.id)}">Clear Points</button>
@@ -2013,6 +2040,35 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           <span>Night Shade</span>
           <input data-ambient-opacity="night" type="number" min="0" max="1" step="0.01" value="${this._escape(this._formatCoordinate(ambient.night_opacity))}" />
         </label>
+      </div>
+    `;
+  }
+
+  _zoneShadeTemplate(zone) {
+    const illuminanceEnabled = zone.illuminanceEnabled === true;
+    const illuminance = this._zoneIlluminanceInfo(zone);
+    return `
+      <div class="zone-shade-grid">
+        <label>
+          <span>Day Shade</span>
+          <input data-zone-opacity="day" data-zone-opacity-key="${this._escape(zone.id)}" type="number" min="0" max="1" step="0.01" value="${this._escape(this._formatCoordinate(this._zoneOpacity(zone, "day")))}" />
+        </label>
+        <label>
+          <span>Night Shade</span>
+          <input data-zone-opacity="night" data-zone-opacity-key="${this._escape(zone.id)}" type="number" min="0" max="1" step="0.01" value="${this._escape(this._formatCoordinate(this._zoneOpacity(zone, "night")))}" />
+        </label>
+        <label class="zone-illuminance-toggle">
+          <span>Illuminance Sensor</span>
+          <input data-zone-illuminance-enabled="${this._escape(zone.id)}" type="checkbox" ${illuminanceEnabled ? "checked" : ""} />
+        </label>
+        <label class="zone-illuminance-entity">
+          <input data-zone-illuminance-entity="${this._escape(zone.id)}" value="${this._escape(zone.illuminanceEntity || "")}" placeholder="sensor.room_illuminance" ${illuminanceEnabled ? "" : "disabled"} />
+        </label>
+        <label class="zone-illuminance-toggle">
+          <span>Show Lux Value</span>
+          <input data-zone-show-lux="${this._escape(zone.id)}" type="checkbox" ${zone.showLux === true ? "checked" : ""} ${illuminanceEnabled ? "" : "disabled"} />
+        </label>
+        ${illuminanceEnabled ? `<small class="zone-illuminance-status">${this._escape(illuminance ? `${this._formatLux(illuminance.lux)} lux -> shade ${this._formatCoordinate(illuminance.opacity)}` : "No valid lux value, using day/night shade")}</small>` : ""}
       </div>
     `;
   }
@@ -2113,6 +2169,49 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         this._refresh3DZoneOverlay();
       });
     });
+    root?.querySelectorAll("[data-zone-opacity]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const zone = this._zones[event.currentTarget.dataset.zoneOpacityKey];
+        if (!zone) return;
+        const opacity = Number(event.currentTarget.value);
+        if (!Number.isFinite(opacity)) return;
+        const property = event.currentTarget.dataset.zoneOpacity === "night" ? "nightOpacity" : "dayOpacity";
+        zone[property] = this._zoneOpacityValue(opacity, property === "nightOpacity" ? 1 : 0.5);
+        this._saveZones();
+        this._refreshZoneTools();
+        this._refresh3DZoneOverlay();
+      });
+    });
+    root?.querySelectorAll("[data-zone-illuminance-enabled]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const zone = this._zones[event.currentTarget.dataset.zoneIlluminanceEnabled];
+        if (!zone) return;
+        zone.illuminanceEnabled = event.currentTarget.checked;
+        if (!zone.illuminanceEnabled) zone.showLux = false;
+        this._saveZones();
+        this._refreshZoneTools();
+        this._refresh3DZoneOverlay();
+      });
+    });
+    root?.querySelectorAll("[data-zone-illuminance-entity]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const zone = this._zones[event.currentTarget.dataset.zoneIlluminanceEntity];
+        if (!zone) return;
+        zone.illuminanceEntity = event.currentTarget.value.trim();
+        this._saveZones();
+        this._refresh3DZoneOverlay();
+      });
+    });
+    root?.querySelectorAll("[data-zone-show-lux]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const zone = this._zones[event.currentTarget.dataset.zoneShowLux];
+        if (!zone) return;
+        zone.showLux = event.currentTarget.checked;
+        this._saveZones();
+        this._refreshZoneTools();
+        this._refresh3DZoneOverlay();
+      });
+    });
     root?.querySelectorAll("[data-ambient-opacity]").forEach((element) => {
       element.addEventListener("change", (event) => {
         const opacity = Number(event.currentTarget.value);
@@ -2191,6 +2290,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       name,
       color: "#f8d66d",
       height: 0,
+      dayOpacity: 0.5,
+      nightOpacity: 1,
+      illuminanceEnabled: false,
+      illuminanceEntity: "",
+      showLux: false,
       points: [],
     };
     this._setZoneDrawing(id, true);
@@ -2307,6 +2411,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
             : `<span class="placed">${this._pendingDeviceKey === row.key ? "Click model" : "Select"}</span>`
         }
         ${placed ? this._iconSelect(row) : ""}
+        ${placed ? this._markerDisplayEditor(row) : ""}
         ${placed ? this._actionEditor(row) : ""}
         ${placed ? this._lightIntensityEditor(row) : ""}
         ${placed ? this._coordinateEditor(row) : ""}
@@ -2432,6 +2537,35 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return this._markerActionOptions(type).some(([option]) => option === value) ? value : "";
   }
 
+  _normalizeMarkerDisplay(value) {
+    const display = String(value || "").trim();
+    return ["icon", "value"].includes(display) ? display : "";
+  }
+
+  _markerDisplayMode(row) {
+    const marker = this._markers[row?.key] || {};
+    const override = this._normalizeMarkerDisplay(marker.markerDisplay);
+    if (override) return override;
+    if (row?.primaryDomain === "sensor" && ["temperature", "humidity"].includes(row.primaryDeviceClass)) return "value";
+    return "icon";
+  }
+
+  _markerFace(row) {
+    if (this._markerDisplayMode(row) === "value") {
+      return { type: "value", value: this._formatMarkerValue(row) };
+    }
+    return { type: "icon", icon: this._markerIcon(row) };
+  }
+
+  _formatMarkerValue(row) {
+    const state = row?.primaryState;
+    if (state === undefined || state === null || state === "") return "-";
+    if (this._isOffline(state)) return "-";
+    const number = Number(state);
+    const value = Number.isFinite(number) ? (Math.abs(number) >= 100 ? number.toFixed(0) : Math.abs(number) >= 10 ? number.toFixed(1) : number.toFixed(1)) : String(state);
+    return `${value}${row?.unit || ""}`;
+  }
+
   _normalizeLightIntensity(value) {
     const number = Number(value);
     return Number.isFinite(number) ? Math.max(0, Math.min(100, Math.round(number))) : 100;
@@ -2475,6 +2609,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         <button type="button" data-edit-marker="${this._escape(key)}">Move</button>
       </div>
       ${row ? this._actionEditor(row) : ""}
+      ${row ? this._markerDisplayEditor(row) : ""}
       ${row ? this._lightIntensityEditor(row) : ""}
       <div class="coordinate-editor selected-coordinates">
         ${["x", "y", "z"]
@@ -2576,6 +2711,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       });
     });
 
+    rowElement.querySelectorAll("[data-marker-display]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        this._updateMarkerDisplay(event.currentTarget.dataset.markerDisplay, event.currentTarget.value);
+      });
+    });
+
     rowElement.querySelectorAll("[data-marker-action]").forEach((element) => {
       element.addEventListener("pointerdown", (event) => event.stopPropagation());
       element.addEventListener("change", (event) => {
@@ -2618,22 +2760,40 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     `;
   }
 
+  _markerDisplayEditor(row) {
+    const marker = this._markers[row.key] || {};
+    const selected = this._normalizeMarkerDisplay(marker.markerDisplay) || "auto";
+    const options = [
+      ["auto", "Auto"],
+      ["icon", "Icon"],
+      ["value", "Value"],
+    ]
+      .map(([value, label]) => `<option value="${this._escape(value)}" ${selected === value ? "selected" : ""}>${this._escape(label)}</option>`)
+      .join("");
+    return `
+      <label class="marker-display-picker">
+        <span>Marker display</span>
+        <select data-marker-display="${this._escape(row.key)}">${options}</select>
+      </label>
+    `;
+  }
+
   _markerTemplate(row, isEditing) {
     const marker = this._markers[row.key];
     const size = this._display.markerSize;
-    const icon = this._markerIcon(row);
+    const content = this._markerFace(row);
     const stateClass = this._stateClass(row);
     const title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
     return `
       <button
-        class="marker ${this._display.showLabels ? "with-label" : "icon-only"} ${this._config.show_entity_state ? "state-mode" : ""} ${stateClass} ${isEditing && this._selectedMarkers.has(row.key) ? "selected" : ""} ${row.offline ? "offline" : "online"}"
+        class="marker ${this._display.showLabels ? "with-label" : "icon-only"} ${content.type === "value" ? "value-marker" : ""} ${this._config.show_entity_state ? "state-mode" : ""} ${stateClass} ${isEditing && this._selectedMarkers.has(row.key) ? "selected" : ""} ${row.offline ? "offline" : "online"}"
         style="left: ${this._escape(marker.x)}%; top: ${this._escape(marker.y)}%; --marker-size: ${this._escape(size)}px;"
         draggable="${isEditing ? "true" : "false"}"
         data-marker="${this._escape(row.key)}"
         data-entity="${this._escape(row.entityId)}"
         title="${this._escape(title)}"
       >
-        <span><ha-icon icon="${this._escape(icon)}"></ha-icon></span>
+        <span class="${content.type === "value" ? "value-face" : ""}">${content.type === "value" ? this._escape(content.value) : `<ha-icon icon="${this._escape(content.icon)}"></ha-icon>`}</span>
         ${this._display.showLabels ? `<strong>${this._escape(row.name)}</strong>` : ""}
       </button>
     `;
@@ -2698,6 +2858,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     `        name: ${marker.name}`,
                     `        coordinate_space: display`,
                     ...(marker.icon ? [`        icon: ${marker.icon}`] : []),
+                    ...(marker.markerDisplay ? [`        marker_display: ${marker.markerDisplay}`] : []),
                     `        tap_action: ${marker.tapAction}`,
                     `        hold_action: ${marker.holdAction}`,
                     ...(marker.lightIntensity !== "" ? [`        light_intensity: ${marker.lightIntensity}`] : []),
@@ -2715,6 +2876,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     `        name: ${zone.name}`,
                     `        color: "${zone.color}"`,
                     `        height: ${zone.height}`,
+                    `        day_opacity: ${zone.dayOpacity}`,
+                    `        night_opacity: ${zone.nightOpacity}`,
+                    ...(zone.illuminanceEnabled ? [`        illuminance_enabled: true`, ...(zone.illuminanceEntity ? [`        illuminance_entity: ${zone.illuminanceEntity}`] : [])] : []),
+                    ...(zone.showLux ? [`        show_lux: true`] : []),
                     "        points:",
                     ...zone.points.flatMap((point) => [
                       `          - x: ${point.x}`,
@@ -2743,6 +2908,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               `    name: ${marker.name}`,
               `    coordinate_space: display`,
               ...(marker.icon ? [`    icon: ${marker.icon}`] : []),
+              ...(marker.markerDisplay ? [`    marker_display: ${marker.markerDisplay}`] : []),
               `    tap_action: ${marker.tapAction}`,
               `    hold_action: ${marker.holdAction}`,
               ...(marker.lightIntensity !== "" ? [`    light_intensity: ${marker.lightIntensity}`] : []),
@@ -2761,6 +2927,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               `    name: ${zone.name}`,
               `    color: "${zone.color}"`,
               `    height: ${zone.height}`,
+              `    day_opacity: ${zone.dayOpacity}`,
+              `    night_opacity: ${zone.nightOpacity}`,
+              ...(zone.illuminanceEnabled ? [`    illuminance_enabled: true`, ...(zone.illuminanceEntity ? [`    illuminance_entity: ${zone.illuminanceEntity}`] : [])] : []),
+              ...(zone.showLux ? [`    show_lux: true`] : []),
               "    points:",
               ...zone.points.flatMap((point) => [
                 `      - x: ${point.x}`,
@@ -2784,6 +2954,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           entity: row?.entityId || marker.entityId,
           name: row?.name || marker.name || key,
           icon: marker.icon || "",
+          markerDisplay: this._normalizeMarkerDisplay(marker.markerDisplay || marker.marker_display),
           tapAction: this._exportMarkerAction(row, marker, "tap"),
           holdAction: this._exportMarkerAction(row, marker, "hold"),
           lightIntensity: row?.primaryDomain === "light" || hasCustomLightIntensity ? this._normalizeLightIntensity(marker.lightIntensity) : "",
@@ -2796,13 +2967,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   }
 
   _yamlAmbientDarkness() {
+    if (this._config.ambient_darkness === false) return ["ambient_darkness: false"];
     const ambient = this._ambientDarknessConfig();
-    if (!ambient.day_opacity && !ambient.night_opacity) return [];
     return [
       "ambient_darkness:",
       ...(ambient.entity ? [`  entity: ${ambient.entity}`] : []),
-      `  day_opacity: ${this._formatCoordinate(ambient.day_opacity)}`,
-      `  night_opacity: ${this._formatCoordinate(ambient.night_opacity)}`,
     ];
   }
 
@@ -2814,6 +2983,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         name: zone.name,
         color: zone.color || "#f8d66d",
         height: this._formatCoordinate(this._zoneHeight(zone)),
+        dayOpacity: this._formatCoordinate(this._zoneOpacity(zone, "day")),
+        nightOpacity: this._formatCoordinate(this._zoneOpacity(zone, "night")),
+        illuminanceEnabled: zone.illuminanceEnabled === true,
+        illuminanceEntity: zone.illuminanceEntity || "",
+        showLux: zone.showLux === true,
         points: (zone.points || []).map((point) => {
           const displayPoint = this._modelToDisplayPoint(point);
           return {
@@ -2991,6 +3165,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         controls.update();
         this._captureModelCameraState();
         this._update3DMarkerButtons(this._modelViewer?.markerButtons || markerButtons, THREE, camera, container);
+        this._update3DZoneLabels(this._modelViewer?.zoneLabels || [], THREE, camera, container);
         this._update3DZonePointButtons(this._modelViewer?.zonePointButtons, THREE, camera, container);
         renderer.render(scene, camera);
         this._modelViewer.animationFrame = requestAnimationFrame(animate);
@@ -3094,13 +3269,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       const button = document.createElement("button");
       button.type = "button";
       const stateClass = this._stateClass(row);
-      button.className = `model-marker ${this._display.showLabels ? "with-label" : "icon-only"} ${stateClass} ${row.offline ? "offline" : "online"}`;
+      const content = this._markerFace(row);
+      button.className = `model-marker ${this._display.showLabels ? "with-label" : "icon-only"} ${content.type === "value" ? "value-marker" : ""} ${stateClass} ${row.offline ? "offline" : "online"}`;
       button.dataset.marker = row.key;
       button.dataset.entity = row.entityId;
       button.title = `${row.name} - ${row.primaryState}`;
       button.style.setProperty("--marker-size", `${this._display.markerSize}px`);
       button.innerHTML = `
-        <span><ha-icon icon="${this._escape(this._markerIcon(row))}"></ha-icon></span>
+        <span class="${content.type === "value" ? "value-face" : ""}">${content.type === "value" ? this._escape(content.value) : `<ha-icon icon="${this._escape(content.icon)}"></ha-icon>`}</span>
         ${this._display.showLabels ? `<strong>${this._escape(row.name)}</strong>` : ""}
       `;
       this._attachMarkerPressActions(button, row);
@@ -3226,7 +3402,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     while (zoneGroup.children.length) {
       const child = zoneGroup.children.pop();
       child.geometry?.dispose?.();
-      child.material?.dispose?.();
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      materials.filter(Boolean).forEach((material) => {
+        material.map?.dispose?.();
+        material.dispose?.();
+      });
     }
 
     const rowByKey = new Map(this._deviceRows().map((row) => [row.key, row]));
@@ -3254,6 +3434,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       const outline = this._zoneOutline(THREE, zone);
       if (outline) zoneGroup.add(outline);
     }
+    this._refresh3DZoneLabels();
     this._refresh3DZonePointOverlay();
   }
 
@@ -3418,6 +3599,46 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._update3DZonePointButtons(viewer.zonePointButtons, viewer.THREE, viewer.camera, viewer.container);
   }
 
+  _refresh3DZoneLabels() {
+    const viewer = this._modelViewer;
+    if (!viewer?.THREE || !viewer?.camera || !viewer?.container) return;
+    const layer = viewer.container.querySelector("[data-zone-label-layer]");
+    if (!layer) return;
+    layer.innerHTML = "";
+    viewer.zoneLabels = Object.values(this._zones || [])
+      .map((zone) => {
+        if (zone.showLux !== true) return null;
+        const illuminance = this._zoneIlluminanceInfo(zone);
+        if (!illuminance) return null;
+        const center = this._zoneCenter(zone);
+        if (!center) return null;
+        const label = document.createElement("div");
+        label.className = "zone-lux-label";
+        label.textContent = this._mode === "edit" ? `${this._formatLux(illuminance.lux)} lux / shade ${this._formatCoordinate(illuminance.opacity)}` : `${this._formatLux(illuminance.lux)} lux`;
+        layer.appendChild(label);
+        return {
+          label,
+          position: new viewer.THREE.Vector3(center.x, center.y, center.z),
+        };
+      })
+      .filter(Boolean);
+    this._update3DZoneLabels(viewer.zoneLabels, viewer.THREE, viewer.camera, viewer.container);
+  }
+
+  _zoneCenter(zone) {
+    const points = this._offsetZonePoints(zone.points || [], 0.08);
+    if (!points.length) return null;
+    return points.reduce(
+      (center, point) => {
+        center.x += Number(point.x) / points.length;
+        center.y += Number(point.y) / points.length;
+        center.z += Number(point.z) / points.length;
+        return center;
+      },
+      { x: 0, y: 0, z: 0 }
+    );
+  }
+
   _build3DZonePointButtons(layer, THREE) {
     layer.innerHTML = "";
     if (this._mode !== "edit" || this._sidebarTab !== "areas") return [];
@@ -3461,6 +3682,21 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     }
   }
 
+  _update3DZoneLabels(zoneLabels, THREE, camera, container) {
+    if (!zoneLabels?.length) return;
+    const width = container.clientWidth || 1;
+    const height = container.clientHeight || 1;
+    for (const zoneLabel of zoneLabels) {
+      const point = zoneLabel.position.clone().project(camera);
+      const visible = point.z > -1 && point.z < 1;
+      zoneLabel.label.hidden = !visible;
+      if (!visible) continue;
+      const x = (point.x * 0.5 + 0.5) * width;
+      const y = (-point.y * 0.5 + 0.5) * height;
+      zoneLabel.label.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%)`;
+    }
+  }
+
   _offsetZonePoints(points, lift = 0.025) {
     const modelVertical = this._coordinateMap()[this._verticalAxis()] || "z";
     const offset = Number.isFinite(Number(lift)) ? Number(lift) : 0.025;
@@ -3484,7 +3720,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _ambientDarknessConfig() {
     const value = this._config.ambient_darkness;
     if (value === false) {
-      return { entity: "", day_opacity: 0, night_opacity: 0 };
+      return { disabled: true, entity: "", day_opacity: 0, night_opacity: 0 };
     }
     return {
       entity: value?.entity || "sun.sun",
@@ -3501,10 +3737,37 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   }
 
   _zoneAmbientDarknessOpacity(zone) {
+    const illuminance = this._zoneIlluminanceOpacity(zone);
+    if (illuminance !== null) return illuminance;
     const config = this._ambientDarknessConfig();
+    if (config.disabled) return 0;
     const state = config.entity ? this._hass?.states?.[config.entity]?.state : "";
     const isNight = String(state || "").toLowerCase() === "below_horizon";
     return this._zoneOpacity(zone, isNight ? "night" : "day");
+  }
+
+  _zoneIlluminanceOpacity(zone = {}) {
+    return this._zoneIlluminanceInfo(zone)?.opacity ?? null;
+  }
+
+  _zoneIlluminanceInfo(zone = {}) {
+    if (zone.illuminanceEnabled !== true || !zone.illuminanceEntity) return null;
+    const stateObj = this._hass?.states?.[zone.illuminanceEntity];
+    const lux = Number(stateObj?.state);
+    if (!Number.isFinite(lux)) return null;
+    const day = this._zoneOpacity(zone, "day");
+    const night = this._zoneOpacity(zone, "night");
+    const normalized = Math.max(0, lux / 300);
+    const opacity = Math.max(0, Math.min(1, night - (night - day) * normalized));
+    return { lux, opacity };
+  }
+
+  _formatLux(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "";
+    if (Math.abs(number) >= 100) return number.toFixed(0);
+    if (Math.abs(number) >= 10) return number.toFixed(1);
+    return number.toFixed(2);
   }
 
   _zoneDarkness(brightness, zone) {
@@ -3686,6 +3949,18 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
   }
 
+  _updateMarkerDisplay(key, value) {
+    if (!this._markers[key]) return;
+    const display = this._normalizeMarkerDisplay(value);
+    if ((this._markers[key].markerDisplay || "") === display) return;
+    this._pushMarkerHistory();
+    this._markers[key].markerDisplay = display;
+    this._saveMarkers();
+    this._refresh3DMarkerOverlay();
+    this._refreshDeviceRow(key);
+    if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+  }
+
   _updateLightIntensity(key, value, options = {}) {
     if (!this._markers[key]) return;
     const intensity = this._normalizeLightIntensity(value);
@@ -3749,6 +4024,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       entityId: row.entityId,
       name: row.name,
       icon: existingMarker?.icon || "",
+      markerDisplay: existingMarker?.markerDisplay || "",
       tapAction: existingMarker?.tapAction || "",
       holdAction: existingMarker?.holdAction || "",
       lightIntensity: this._normalizeLightIntensity(existingMarker?.lightIntensity),
@@ -4005,6 +4281,30 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           gap: 6px;
         }
 
+        .zone-illuminance-entity {
+          grid-column: 1 / -1;
+        }
+
+        .zone-illuminance-toggle {
+          grid-column: 1 / -1;
+          display: flex;
+          align-content: end;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+
+        .zone-illuminance-toggle input {
+          flex: 0 0 auto;
+        }
+
+        .zone-illuminance-status {
+          grid-column: 1 / -1;
+          color: var(--dmp-muted);
+          font-size: 11px;
+          font-weight: 700;
+        }
+
         .zone-point-list {
           display: grid;
           gap: 5px;
@@ -4232,6 +4532,32 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         }
 
         .action-editor select {
+          min-width: 0;
+          min-height: 28px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 6px;
+          background: var(--secondary-background-color, #f7f8fa);
+          color: var(--primary-text-color);
+          font: inherit;
+          font-size: 12px;
+          padding: 0 6px;
+        }
+
+        .marker-display-picker {
+          grid-column: 1 / 4;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 120px;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .marker-display-picker span {
+          color: var(--dmp-muted);
+          font-size: 10px;
+          font-weight: 800;
+        }
+
+        .marker-display-picker select {
           min-width: 0;
           min-height: 28px;
           border: 1px solid var(--dmp-border);
@@ -4650,6 +4976,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         }
 
         .model-marker-layer,
+        .model-zone-label-layer,
         .model-zone-point-layer {
           position: absolute;
           inset: 0;
@@ -4664,8 +4991,29 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           z-index: 5;
         }
 
+        .model-zone-label-layer {
+          z-index: 4;
+        }
+
         .model-viewer.zone-drawing .model-marker-layer {
           display: none;
+        }
+
+        .zone-lux-label {
+          position: absolute;
+          left: 0;
+          top: 0;
+          border: 1px solid rgba(255, 255, 255, 0.36);
+          border-radius: 999px;
+          background: rgba(15, 23, 42, 0.78);
+          box-shadow: 0 6px 18px rgba(0, 0, 0, 0.26);
+          color: #fff;
+          font-size: 12px;
+          font-weight: 800;
+          line-height: 1;
+          padding: 6px 10px;
+          white-space: nowrap;
+          backdrop-filter: blur(4px);
         }
 
         .zone-point-handle {
@@ -4725,6 +5073,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           padding: 3px;
         }
 
+        .model-marker.icon-only.value-marker {
+          width: auto;
+          min-width: calc(var(--marker-size, 22px) + 6px);
+        }
+
         .model-marker span {
           display: grid;
           place-items: center;
@@ -4735,6 +5088,18 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           border-radius: 50%;
           background: var(--dmp-good);
           color: #fff;
+        }
+
+        .model-marker span.value-face {
+          width: auto;
+          min-width: var(--marker-size, 22px);
+          padding: 0 6px;
+          border-radius: 999px;
+          font-size: 10px;
+          font-weight: 900;
+          line-height: 1;
+          letter-spacing: 0;
+          white-space: nowrap;
         }
 
         .model-marker.state-active span {
@@ -4873,11 +5238,26 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           margin-bottom: 8px;
         }
 
+        .selected-marker-panel .marker-display-picker {
+          grid-column: auto;
+          margin-bottom: 8px;
+        }
+
         .selected-marker-panel .action-editor span {
           color: rgba(255, 255, 255, 0.72);
         }
 
         .selected-marker-panel .action-editor select {
+          border-color: rgba(255, 255, 255, 0.22);
+          background: rgba(15, 23, 42, 0.9);
+          color: #fff;
+        }
+
+        .selected-marker-panel .marker-display-picker span {
+          color: rgba(255, 255, 255, 0.72);
+        }
+
+        .selected-marker-panel .marker-display-picker select {
           border-color: rgba(255, 255, 255, 0.22);
           background: rgba(15, 23, 42, 0.9);
           color: #fff;
@@ -5109,6 +5489,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           padding: 3px;
         }
 
+        .marker.icon-only.value-marker {
+          width: auto;
+          min-width: calc(var(--marker-size) + 6px);
+        }
+
         .marker:active {
           cursor: grabbing;
         }
@@ -5144,6 +5529,19 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           border-radius: 50%;
           box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.85), 0 0 13px rgba(29, 143, 95, 0.78);
           line-height: 0;
+        }
+
+        .marker span.value-face {
+          flex-basis: auto;
+          width: auto;
+          min-width: var(--marker-size);
+          padding: 0 6px;
+          border-radius: 999px;
+          font-size: 10px;
+          font-weight: 900;
+          line-height: 1;
+          letter-spacing: 0;
+          white-space: nowrap;
         }
 
         .marker.online span {

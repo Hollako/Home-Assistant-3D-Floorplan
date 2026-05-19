@@ -101,6 +101,21 @@ Temperature and humidity `sensor.*` markers show their live value on the marker 
 marker_display: value # auto when omitted, or icon/value
 ```
 
+## Camera Views
+
+The 3D viewer includes a compass in the upper-right corner. Press **Top** for a straight top-down view, or **N**, **E**, **S**, and **W** for quick 45-degree angled side views. These view buttons animate the camera between views while keeping the current camera target and distance, so they change orientation without resetting your zoom.
+
+Admins in Edit Mode also get **Save Home** and **Clear** controls in the compass. Rotate, pan, and zoom to the view you want, then press **Save Home** to store the current camera as the startup view for the active floor. The saved view is used when the card is first loaded or the dashboard page is refreshed, while normal Home Assistant state updates still preserve the camera position you are currently using.
+
+The YAML export includes saved startup views as:
+
+```yaml
+default_view:
+  position: [6.2500, 4.5000, 8.7500]
+  target: [0.0000, 0.8000, 0.0000]
+  zoom: 1.0000
+```
+
 ## Brightness Areas
 
 Edit Mode can define room brightness areas. Press **Add Area**, then **Draw**, and click the room corners on the 3D model. Any placed `light.*` marker inside that polygon contributes to the area's glow: off lights add no glow, lights without a brightness attribute count as fully on, and dimmable lights use their `brightness` value multiplied by the marker's `light_intensity` percentage.

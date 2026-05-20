@@ -78,7 +78,7 @@ Use `.glb` or `.gltf` when possible. Basic `.obj` files can load, but `.glb` is 
 4. Click the exact point on the 3D model where the marker should sit.
 5. Open **Export YAML** and press **Copy YAML** to copy the current marker coordinates into your dashboard/card configuration.
 
-The YAML export updates automatically after marker placement, moves, coordinate edits, icon changes, and action changes. Browser storage is device-local; paste the exported markers into the card YAML when you want the same layout on every phone, tablet, and browser.
+The YAML export updates automatically after marker placement, moves, coordinate edits, icon changes, and action changes. Browser storage is device-local; paste the exported `markers:` block into the card visual editor's **Markers YAML** section when you want the same layout on every phone, tablet, and browser.
 
 Markers are stored as real model coordinates:
 

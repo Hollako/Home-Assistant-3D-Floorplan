@@ -356,30 +356,6 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return "state-neutral";
   }
 
-  _iconOptions() {
-    return [
-      ["auto", "Auto"],
-      ["mdi:lightbulb", "Light"],
-      ["mdi:motion-sensor", "Motion"],
-      ["mdi:door", "Door"],
-      ["mdi:window-closed", "Window"],
-      ["mdi:power-socket", "Switch/Plug"],
-      ["mdi:thermostat", "Climate"],
-      ["mdi:thermometer", "Temperature"],
-      ["mdi:water-percent", "Humidity"],
-      ["mdi:smoke-detector", "Smoke"],
-      ["mdi:cctv", "Camera"],
-      ["mdi:lock", "Lock"],
-      ["mdi:garage", "Garage"],
-      ["mdi:blinds", "Cover"],
-      ["mdi:speaker", "Media"],
-      ["mdi:wifi", "Network"],
-      ["mdi:battery", "Battery"],
-      ["mdi:home-alert", "Alert"],
-      ["mdi:devices", "Device"],
-    ];
-  }
-
   _markerIcon(row) {
     const markerIcon = this._markers[row.key]?.icon;
     if (markerIcon) return markerIcon;
@@ -1402,15 +1378,15 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
     this.shadowRoot.querySelectorAll("[data-icon]").forEach((element) => {
       element.addEventListener("pointerdown", (event) => event.stopPropagation());
-      element.addEventListener("change", (event) => {
-        const key = event.currentTarget.dataset.icon;
-        if (!this._markers[key]) return;
-        const value = event.currentTarget.value;
-        if ((this._markers[key].icon || "") === (value === "auto" ? "" : value)) return;
-        this._pushMarkerHistory();
-        this._markers[key].icon = value === "auto" ? "" : value;
-        this._saveMarkers();
-        this._refresh3DMarkerOverlay();
+      element.addEventListener("change", (event) => this._updateMarkerIcon(event.currentTarget.dataset.icon, event.detail?.value ?? event.currentTarget.value));
+      element.addEventListener("value-changed", (event) => this._updateMarkerIcon(event.currentTarget.dataset.icon, event.detail?.value ?? event.currentTarget.value));
+    });
+
+    this.shadowRoot.querySelectorAll("[data-icon-auto]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._updateMarkerIcon(event.currentTarget.dataset.iconAuto, "");
       });
     });
 
@@ -3077,15 +3053,15 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
     rowElement.querySelectorAll("[data-icon]").forEach((element) => {
       element.addEventListener("pointerdown", (event) => event.stopPropagation());
-      element.addEventListener("change", (event) => {
-        const key = event.currentTarget.dataset.icon;
-        if (!this._markers[key]) return;
-        const value = event.currentTarget.value;
-        if ((this._markers[key].icon || "") === (value === "auto" ? "" : value)) return;
-        this._pushMarkerHistory();
-        this._markers[key].icon = value === "auto" ? "" : value;
-        this._saveMarkers();
-        this._refresh3DMarkerOverlay();
+      element.addEventListener("change", (event) => this._updateMarkerIcon(event.currentTarget.dataset.icon, event.detail?.value ?? event.currentTarget.value));
+      element.addEventListener("value-changed", (event) => this._updateMarkerIcon(event.currentTarget.dataset.icon, event.detail?.value ?? event.currentTarget.value));
+    });
+
+    rowElement.querySelectorAll("[data-icon-auto]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._updateMarkerIcon(event.currentTarget.dataset.iconAuto, "");
       });
     });
 
@@ -3126,14 +3102,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _iconSelect(row) {
     const selected = this._markers[row.key]?.icon || "auto";
-    const options = this._iconOptions()
-      .map(([value, label]) => `<option value="${this._escape(value)}" ${selected === value ? "selected" : ""}>${this._escape(label)}</option>`)
-      .join("");
-
     return `
       <label class="icon-picker">
         <span>Icon</span>
-        <select data-icon="${this._escape(row.key)}">${options}</select>
+        <div class="icon-picker-control">
+          <ha-icon-picker data-icon="${this._escape(row.key)}" value="${selected === "auto" ? "" : this._escape(selected)}"></ha-icon-picker>
+          <button type="button" data-icon-auto="${this._escape(row.key)}" title="Use entity default icon">Auto</button>
+        </div>
       </label>
     `;
   }
@@ -4385,6 +4360,18 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
   }
 
+  _updateMarkerIcon(key, value) {
+    if (!this._markers[key]) return;
+    const icon = String(value || "").trim();
+    if ((this._markers[key].icon || "") === icon) return;
+    this._pushMarkerHistory();
+    this._markers[key].icon = icon;
+    this._saveMarkers();
+    this._refresh3DMarkerOverlay();
+    this._refreshDeviceRow(key);
+    if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+  }
+
   _updateMarkerDisplay(key, value) {
     if (!this._markers[key]) return;
     const display = this._normalizeMarkerDisplay(value);
@@ -4924,11 +4911,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         .icon-picker {
           grid-column: 2 / 4;
           display: grid;
-          grid-template-columns: auto minmax(0, 1fr);
-          align-items: center;
+          grid-template-columns: minmax(0, 1fr);
           gap: 6px;
           margin-top: 0;
-          align-self: end;
         }
 
         .icon-picker span {
@@ -4937,9 +4922,46 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           font-weight: 700;
         }
 
-        .icon-picker select {
+        .icon-picker-control {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 48px;
+          align-items: center;
+          gap: 6px;
+          min-width: 0;
+        }
+
+        .icon-picker ha-icon-picker {
+          min-width: 0;
           min-height: 28px;
+          --mdc-theme-primary: var(--primary-color);
+          --mdc-shape-small: 6px;
+          --ha-icon-picker-input-height: 28px;
+          --ha-icon-picker-input-border-radius: 6px;
+          --ha-icon-picker-input-background: var(--secondary-background-color, #f7f8fa);
+          --ha-icon-picker-input-border: 1px solid var(--dmp-border);
+          --ha-icon-picker-input-color: var(--primary-text-color);
+        }
+
+        .icon-picker ha-icon-picker::part(input) {
+          min-height: 28px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 6px;
+          background: var(--secondary-background-color, #f7f8fa);
+          color: var(--primary-text-color);
           font-size: 12px;
+          padding: 0 7px;
+        }
+
+        .icon-picker button {
+          min-height: 28px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 6px;
+          background: var(--secondary-background-color, #f7f8fa);
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font: inherit;
+          font-size: 12px;
+          font-weight: 800;
           padding: 0 7px;
         }
 
@@ -6274,13 +6296,396 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 customElements.define("home-assistant-3d-floorplan", HomeAssistant3DFloorplan);
 
 class HomeAssistant3DFloorplanEditor extends HTMLElement {
+  constructor() {
+    super();
+    this._config = {};
+    this._markerYamlError = "";
+  }
+
   setConfig(config) {
-    this._config = config;
+    this._config = { ...(config || {}) };
+    this._render();
+  }
+
+  _render() {
     this.innerHTML = `
-      <div style="padding: 12px; color: var(--primary-text-color);">
-        Configure this card in YAML with a 3D model, then use Edit Mode to select entities and click the model to place markers.
+      <style>
+        .floorplan-editor {
+          display: grid;
+          gap: 14px;
+          padding: 12px 0;
+          color: var(--primary-text-color);
+        }
+
+        .floorplan-editor section {
+          display: grid;
+          gap: 10px;
+          padding: 12px;
+          border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.25));
+          border-radius: 8px;
+          background: var(--card-background-color, #fff);
+        }
+
+        .floorplan-editor h3 {
+          margin: 0;
+          font-size: 14px;
+          font-weight: 700;
+        }
+
+        .editor-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 10px;
+        }
+
+        .floorplan-editor label {
+          display: grid;
+          gap: 4px;
+          min-width: 0;
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .floorplan-editor input,
+        .floorplan-editor select,
+        .floorplan-editor textarea {
+          width: 100%;
+          box-sizing: border-box;
+          border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.35));
+          border-radius: 6px;
+          background: var(--secondary-background-color, #f7f8fa);
+          color: var(--primary-text-color);
+          font: inherit;
+          padding: 8px;
+        }
+
+        .floorplan-editor textarea {
+          min-height: 220px;
+          resize: vertical;
+          font-family: monospace;
+          font-size: 12px;
+          line-height: 1.45;
+        }
+
+        .checkbox-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+        }
+
+        .checkbox-row input {
+          width: auto;
+        }
+
+        .editor-help {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          line-height: 1.4;
+        }
+
+        .editor-error {
+          color: var(--error-color, #db4437);
+          font-size: 12px;
+          font-weight: 700;
+        }
+      </style>
+      <div class="floorplan-editor">
+        <section>
+          <h3>Basic</h3>
+          <div class="editor-grid">
+            ${this._textInput("title", "Title", "3D Floorplan")}
+            ${this._textInput("model", "3D Model URL", "/local/floorplans/home.glb")}
+            ${this._textInput("model_background", "Model Background", "#111827")}
+          </div>
+        </section>
+
+        <section>
+          <h3>Editing & Display</h3>
+          <div class="editor-grid">
+            ${this._checkboxInput("allow_edit", "Allow Admin Edit Mode", true)}
+            ${this._checkboxInput("show_labels", "Show Marker Names", true)}
+            ${this._checkboxInput("show_entity_state", "Use Entity State Colors", true)}
+            ${this._numberInput("marker_size", "Marker Size", 18, 8, 64, 1)}
+            ${this._numberInput("nudge_step", "Nudge Step", 1, 0.01, 100, 0.01)}
+          </div>
+        </section>
+
+        <section>
+          <h3>Marker Actions</h3>
+          <div class="editor-grid">
+            ${this._selectInput("marker_tap_action", "User Tap", this._actionOptions("tap"))}
+            ${this._selectInput("marker_hold_action", "User Hold", this._actionOptions("hold"))}
+            ${this._selectInput("edit_marker_tap_action", "Edit Tap", this._actionOptions("hold"))}
+            ${this._selectInput("edit_marker_hold_action", "Edit Hold", this._actionOptions("hold"))}
+            ${this._numberInput("marker_hold_ms", "Hold Delay (ms)", 650, 250, 3000, 50)}
+          </div>
+        </section>
+
+        <section>
+          <h3>Offline Devices</h3>
+          <div class="editor-grid">
+            ${this._listInput("offline_states", "Offline States", ["unavailable", "unknown"])}
+            ${this._numberInput("offline_focus_distance", "Offline Focus Distance", 2, 1, 10, 0.1)}
+          </div>
+          <div class="editor-help">Focus distance uses model-relative levels from 1-10. Lower values zoom closer to the offline marker.</div>
+        </section>
+
+        <section>
+          <h3>Entity Filters</h3>
+          <div class="editor-grid">
+            ${this._listInput("domains", "Domains", [])}
+            ${this._listInput("integrations", "Integrations", [])}
+            ${this._listInput("areas", "Areas", [])}
+          </div>
+          <div class="editor-help">Comma-separated values. Leave empty to include all.</div>
+        </section>
+
+        <section>
+          <h3>Coordinates</h3>
+          <div class="editor-grid">
+            ${this._axisSelect("coordinate_map.x", "Display X Uses Model Axis", "z")}
+            ${this._axisSelect("coordinate_map.y", "Display Y Uses Model Axis", "x")}
+            ${this._axisSelect("coordinate_map.z", "Display Z Uses Model Axis", "y")}
+            ${this._axisSelect("vertical_axis", "Vertical Axis", "z")}
+          </div>
+        </section>
+
+        <section>
+          <h3>Ambient Darkness</h3>
+          <div class="editor-grid">
+            ${this._checkboxInput("ambient_darkness_enabled", "Enable Ambient Darkness", this._config.ambient_darkness !== false)}
+            ${this._textInput("ambient_darkness.entity", "Sun Entity", "sun.sun")}
+          </div>
+        </section>
+
+        <section>
+          <h3>Markers YAML</h3>
+          <div class="editor-help">Paste only the exported markers block here. Example: <code>markers:</code> followed by the marker list.</div>
+          <textarea data-markers-yaml spellcheck="false">${this._escape(this._markersToYaml(this._config.markers || []))}</textarea>
+          ${this._markerYamlError ? `<div class="editor-error">${this._escape(this._markerYamlError)}</div>` : ""}
+        </section>
       </div>
     `;
+    this._attachEditorEvents();
+  }
+
+  _attachEditorEvents() {
+    this.querySelectorAll("[data-config-key]").forEach((element) => {
+      const eventName = element.type === "checkbox" ? "change" : "change";
+      element.addEventListener(eventName, (event) => this._handleConfigInput(event.currentTarget));
+    });
+    this.querySelector("[data-markers-yaml]")?.addEventListener("change", (event) => this._handleMarkersYaml(event.currentTarget.value));
+  }
+
+  _handleConfigInput(input) {
+    const key = input.dataset.configKey;
+    const type = input.dataset.configType || "text";
+    let value = input.value;
+    if (type === "checkbox") value = input.checked;
+    if (type === "number") {
+      if (value === "") value = null;
+      else {
+        const number = Number(value);
+        if (!Number.isFinite(number)) return;
+        value = number;
+      }
+    }
+    if (type === "list") value = value.split(",").map((item) => item.trim()).filter(Boolean);
+
+    const nextConfig = JSON.parse(JSON.stringify(this._config || {}));
+    if (key === "ambient_darkness_enabled") {
+      if (value) {
+        nextConfig.ambient_darkness = nextConfig.ambient_darkness && typeof nextConfig.ambient_darkness === "object" ? nextConfig.ambient_darkness : { entity: "sun.sun" };
+      } else {
+        nextConfig.ambient_darkness = false;
+      }
+    } else {
+      this._setConfigPath(nextConfig, key, value);
+      this._cleanupEmptyObjects(nextConfig);
+    }
+    this._commitConfig(nextConfig);
+  }
+
+  _handleMarkersYaml(value) {
+    try {
+      const markers = this._parseMarkersYaml(value);
+      this._markerYamlError = "";
+      this._commitConfig({ ...(this._config || {}), markers });
+    } catch (error) {
+      this._markerYamlError = error?.message || "Invalid markers YAML.";
+      this._render();
+    }
+  }
+
+  _commitConfig(config) {
+    this._config = config;
+    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
+  }
+
+  _setConfigPath(config, path, value) {
+    const parts = path.split(".");
+    let target = config;
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      const part = parts[index];
+      const nextPart = parts[index + 1];
+      if (target[part] === undefined || target[part] === null || typeof target[part] !== "object") {
+        target[part] = /^\d+$/.test(nextPart) ? [] : {};
+      }
+      target = target[part];
+    }
+    const finalKey = parts[parts.length - 1];
+    if (value === null || value === "" || (Array.isArray(value) && !value.length)) {
+      if (Array.isArray(target)) target[Number(finalKey)] = value;
+      else delete target[finalKey];
+      return;
+    }
+    target[finalKey] = value;
+  }
+
+  _cleanupEmptyObjects(config) {
+    if (config.default_view) {
+      const position = (config.default_view.position || []).map(Number);
+      const target = (config.default_view.target || []).map(Number);
+      const zoom = Number(config.default_view.zoom);
+      if (position.filter(Number.isFinite).length !== 3 || target.filter(Number.isFinite).length !== 3) {
+        delete config.default_view;
+      } else {
+        config.default_view = {
+          position,
+          target,
+          ...(Number.isFinite(zoom) ? { zoom } : {}),
+        };
+      }
+    }
+    if (config.ambient_darkness && typeof config.ambient_darkness === "object" && !config.ambient_darkness.entity) {
+      config.ambient_darkness.entity = "sun.sun";
+    }
+  }
+
+  _actionOptions(type) {
+    const options = [
+      ["auto", "Auto"],
+      ["toggle", "Toggle"],
+      ["more-info", "More info"],
+      ["none", "None"],
+    ];
+    return type === "hold" ? [...options, ["move", "Move"], ["select", "Select"]] : options;
+  }
+
+  _axisSelect(key, label, fallback) {
+    return this._selectInput(key, label, [["x", "X"], ["y", "Y"], ["z", "Z"]], fallback);
+  }
+
+  _textInput(key, label, placeholder = "") {
+    return this._field(label, `<input data-config-key="${this._escape(key)}" value="${this._escape(this._getConfigPath(key) ?? "")}" placeholder="${this._escape(placeholder)}" />`);
+  }
+
+  _numberInput(key, label, fallback = "", min = null, max = null, step = 1) {
+    const value = this._getConfigPath(key);
+    return this._field(
+      label,
+      `<input data-config-key="${this._escape(key)}" data-config-type="number" type="number" ${min === null ? "" : `min="${this._escape(min)}"`} ${max === null ? "" : `max="${this._escape(max)}"`} step="${this._escape(step)}" value="${this._escape(value ?? fallback)}" />`
+    );
+  }
+
+  _listInput(key, label, fallback = []) {
+    const value = this._getConfigPath(key);
+    return this._field(label, `<input data-config-key="${this._escape(key)}" data-config-type="list" value="${this._escape((Array.isArray(value) ? value : fallback).join(", "))}" />`);
+  }
+
+  _checkboxInput(key, label, fallback = false) {
+    const value = this._getConfigPath(key);
+    return `<label class="checkbox-row"><span>${this._escape(label)}</span><input data-config-key="${this._escape(key)}" data-config-type="checkbox" type="checkbox" ${(value ?? fallback) ? "checked" : ""} /></label>`;
+  }
+
+  _selectInput(key, label, options, fallback = "") {
+    const value = this._getConfigPath(key) ?? fallback;
+    return this._field(
+      label,
+      `<select data-config-key="${this._escape(key)}">${options.map(([optionValue, optionLabel]) => `<option value="${this._escape(optionValue)}" ${String(value) === String(optionValue) ? "selected" : ""}>${this._escape(optionLabel)}</option>`).join("")}</select>`
+    );
+  }
+
+  _field(label, inputHtml) {
+    return `<label><span>${this._escape(label)}</span>${inputHtml}</label>`;
+  }
+
+  _getConfigPath(path) {
+    if (path === "ambient_darkness_enabled") return this._config.ambient_darkness !== false;
+    return path.split(".").reduce((value, part) => (value === undefined || value === null ? undefined : value[part]), this._config);
+  }
+
+  _markersToYaml(markers = []) {
+    if (!markers.length) return "markers: []";
+    const lines = ["markers:"];
+    markers.forEach((marker) => {
+      lines.push(`  - entity: ${marker.entity || marker.entityId || marker.key || ""}`);
+      Object.entries(marker).forEach(([key, value]) => {
+        const yamlKey = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+        if (["entity", "entity_id", "entityId"].includes(key) || value === undefined || value === null || value === "") return;
+        lines.push(`    ${yamlKey}: ${this._yamlScalar(value)}`);
+      });
+    });
+    return lines.join("\n");
+  }
+
+  _parseMarkersYaml(value) {
+    const text = String(value || "").trim();
+    if (!text || text === "markers: []") return [];
+    if (text.startsWith("[")) return JSON.parse(text);
+    const lines = text.split(/\r?\n/).map((line) => line.replace(/\t/g, "  ")).filter((line) => line.trim() && !line.trim().startsWith("#"));
+    const first = lines[0]?.trim();
+    const listLines = first === "markers:" ? lines.slice(1) : lines;
+    const markers = [];
+    let current = null;
+    listLines.forEach((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("- ")) {
+        current = {};
+        markers.push(current);
+        const rest = trimmed.slice(2).trim();
+        if (rest) this._assignYamlPair(current, rest);
+        return;
+      }
+      if (!current) throw new Error("Markers YAML must be a list under markers:.");
+      this._assignYamlPair(current, trimmed);
+    });
+    return markers.filter((marker) => marker.entity || marker.key);
+  }
+
+  _assignYamlPair(target, line) {
+    const index = line.indexOf(":");
+    if (index < 0) return;
+    const key = line.slice(0, index).trim();
+    const value = line.slice(index + 1).trim();
+    target[key] = this._parseYamlScalar(value);
+  }
+
+  _parseYamlScalar(value) {
+    const text = String(value || "").trim();
+    if (text === "true") return true;
+    if (text === "false") return false;
+    if (text === "null") return null;
+    if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) return text.slice(1, -1);
+    if (/^-?\d+(\.\d+)?$/.test(text)) return Number(text);
+    if (text.startsWith("[") && text.endsWith("]")) return text.slice(1, -1).split(",").map((item) => this._parseYamlScalar(item));
+    return text;
+  }
+
+  _yamlScalar(value) {
+    if (Array.isArray(value)) return `[${value.map((item) => this._yamlScalar(item)).join(", ")}]`;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    const text = String(value ?? "");
+    return /[:#\[\]{}]|^\s|\s$/.test(text) ? JSON.stringify(text) : text;
+  }
+
+  _escape(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 }
 

@@ -689,20 +689,25 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         ? savedMarkers
         : { [this._activeFloorId || this._floors[0]?.id || "default"]: savedMarkers };
       for (const floor of this._floors) {
-        result[floor.id] = this._normalizedMarkers({
-          ...result[floor.id],
-          ...(savedByFloor[floor.id] || {}),
-        });
+        result[floor.id] = this._mergeMarkerMaps(result[floor.id], savedByFloor[floor.id] || {});
       }
       return result;
     }
 
     const floorId = this._floors[0]?.id || "default";
-    result[floorId] = this._normalizedMarkers({
-      ...(result[floorId] || {}),
-      ...(this._looksLikeFloorMarkers(savedMarkers) ? savedMarkers[floorId] || {} : savedMarkers || {}),
-    });
+    result[floorId] = this._mergeMarkerMaps(result[floorId] || {}, this._looksLikeFloorMarkers(savedMarkers) ? savedMarkers[floorId] || {} : savedMarkers || {});
     return result;
+  }
+
+  _mergeMarkerMaps(configMarkers = {}, savedMarkers = {}) {
+    const normalizedConfig = this._normalizedMarkers(configMarkers);
+    const normalizedSaved = this._normalizedMarkers(savedMarkers);
+    return [...new Set([...Object.keys(normalizedConfig), ...Object.keys(normalizedSaved)])].reduce((merged, key) => {
+      const configMarker = normalizedConfig[key];
+      const savedMarker = normalizedSaved[key];
+      merged[key] = configMarker && savedMarker ? { ...configMarker, ...savedMarker } : savedMarker || configMarker;
+      return merged;
+    }, {});
   }
 
   _looksLikeFloorMarkers(value) {
@@ -1125,7 +1130,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               <div class="model-marker-layer" data-model-marker-layer></div>
               <div class="model-zone-label-layer" data-zone-label-layer></div>
               <div class="model-zone-point-layer" data-zone-point-layer></div>
-              ${this._modelCompassTemplate(isEditing)}
+              ${this._modelCompassTemplate()}
               ${isEditing ? `<div class="selected-marker-panel" data-selected-marker-panel>${this._selectedMarkerPanel()}</div>` : ""}
               <div class="model-status" data-model-status>${isEditing ? "Select an entity, then click the 3D model to place it." : "Loading 3D model..."}</div>
             </div>
@@ -2714,7 +2719,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const compass = this.shadowRoot?.querySelector(".model-compass");
     if (!compass) return;
     const template = document.createElement("template");
-    template.innerHTML = this._modelCompassTemplate(this._canEdit() && this._mode === "edit").trim();
+    template.innerHTML = this._modelCompassTemplate().trim();
     const nextCompass = template.content.firstElementChild;
     compass.replaceWith(nextCompass);
     this._bindModelViewControls(nextCompass);
@@ -3152,7 +3157,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     `;
   }
 
-  _modelCompassTemplate(isEditing) {
+  _modelCompassTemplate() {
     const hasDefaultView = Boolean(this._modelDefaultViews?.[this._activeFloorId || "default"]);
     return `
       <div class="model-compass" aria-label="3D view compass">
@@ -3165,8 +3170,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         </div>
         <div class="default-view-actions">
           <button type="button" data-model-view="default" title="Go to saved startup view" aria-label="Go to saved startup view" ${hasDefaultView ? "" : "disabled"}>Home</button>
-          ${isEditing ? `<button type="button" data-model-default-view="save" title="Save current camera as home startup view">Save Home</button>` : ""}
-          ${isEditing ? `<button type="button" data-model-default-view="clear" title="Clear saved startup view" ${hasDefaultView ? "" : "disabled"}>Clear</button>` : ""}
+          <button type="button" data-model-default-view="save" title="Save current camera as home startup view">Save Home</button>
+          <button type="button" data-model-default-view="clear" title="Clear saved startup view" ${hasDefaultView ? "" : "disabled"}>Clear</button>
         </div>
       </div>
     `;

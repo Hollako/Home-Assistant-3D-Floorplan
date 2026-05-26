@@ -42,7 +42,7 @@ this._hass?.user?.is_admin === true
   - View changes animate slowly/cinematically, currently about `1400ms` with ease-in-out.
   - Compass must remain above marker settings in Edit Mode.
 - Saved home/startup view:
-  - In Edit Mode, admin can rotate/pan/zoom to the desired view and press `Save Home`.
+  - Users can rotate/pan/zoom to the desired view and press `Save Home` from either User Mode or Edit Mode.
   - `Home` returns to the saved startup view.
   - `Clear` removes the saved local home view.
   - Saved view is applied on fresh load/page refresh only.
@@ -99,6 +99,10 @@ offline_focus_distance: 2
 - Offline focus distance:
   - Do not treat `offline_focus_distance: 2` as raw model units.
   - Values `1-10` are relative zoom levels based on the fitted camera distance.
+- Marker loading:
+  - YAML/config markers must always remain visible as the base source of truth.
+  - Browser localStorage marker edits are merged per marker on top of YAML only when valid.
+  - Do not let stale localStorage replace a complete YAML marker object and hide configured markers.
 - Edit Mode UI overlap:
   - Compass stays top-right.
   - Selected marker settings panel is moved down below the compass and can scroll if screen height is tight.

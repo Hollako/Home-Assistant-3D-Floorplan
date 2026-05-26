@@ -8,5 +8,7 @@
 - Editor cleanup: removed fixed View Mode and advanced Three.js resource URL fields from the visual editor while keeping YAML support for advanced manual configuration.
 - Editor cleanup: removed manual Default View fields from the visual editor because saved home view is managed from card Edit Mode.
 - Marker icons: replaced the small hardcoded icon dropdown with Home Assistant's full icon picker and an Auto reset button.
+- Marker loading: YAML markers are now merged safely with browser-saved marker edits so stale local storage cannot hide or replace configured YAML markers.
+- Saved home view: Save Home and Clear are now available from the 3D compass in both User Mode and Edit Mode.
 - 3D view compass: the model viewer now has animated one-click Top, North, East, South, and West camera buttons, with the side views set at a 45-degree angle.
 - Startup view: admins can save or clear the current 3D camera as the default load/refresh view, and YAML export now includes the saved `default_view`.

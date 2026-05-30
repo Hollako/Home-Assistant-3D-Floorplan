@@ -1,0 +1,26 @@
+{
+  "name": "home-assistant-3d-floorplan",
+  "version": "1.0.0",
+  "description": "![Home Assistant 3D Floorplan preview](images/preview.png)",
+  "main": "Home-Assistant-3D-Floorplan.js",
+  "scripts": {
+    "build": "node build.js",
+    "build:watch": "node --watch build.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hollako/Home-Assistant-3D-Floorplan.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/Hollako/Home-Assistant-3D-Floorplan/issues"
+  },
+  "homepage": "https://github.com/Hollako/Home-Assistant-3D-Floorplan#readme",
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "three": "^0.165.0"
+  }
+}

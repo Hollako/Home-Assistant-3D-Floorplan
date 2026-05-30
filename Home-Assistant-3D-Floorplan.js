@@ -83,6 +83,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._threeModules = null;
     this._threeModulesPromise = null;
     this._boundKeydown = (event) => this._handleKeydown(event);
+    this._boundVisibilityChange = () => {
+      // Resume with a fresh render when the tab becomes visible again.
+      if (!document.hidden) this._requestRender();
+    };
   }
 
   setConfig(config) {
@@ -115,6 +119,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         night_opacity: 1,
       },
       three_url: "https://esm.sh/three@0.165.0",
+      three_bundle_url: "/local/three.bundle.min.js",
+      model_antialias: true,
+      model_pixel_ratio: 0,
       gltf_loader_url: "https://esm.sh/three@0.165.0/examples/jsm/loaders/GLTFLoader.js",
       obj_loader_url: "https://esm.sh/three@0.165.0/examples/jsm/loaders/OBJLoader.js",
       orbit_controls_url: "https://esm.sh/three@0.165.0/examples/jsm/controls/OrbitControls.js",
@@ -172,11 +179,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   connectedCallback() {
     window.addEventListener("keydown", this._boundKeydown);
+    document.addEventListener("visibilitychange", this._boundVisibilityChange);
     this._queueModelViewerRecovery();
   }
 
   disconnectedCallback() {
     window.removeEventListener("keydown", this._boundKeydown);
+    document.removeEventListener("visibilitychange", this._boundVisibilityChange);
     window.clearTimeout(this._modelRecoveryTimer);
     this._disposeModelViewer();
   }
@@ -3417,12 +3426,31 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (this._threeModules) return this._threeModules;
     if (this._threeModulesPromise) return this._threeModulesPromise;
 
-    this._threeModulesPromise = Promise.all([
-      this._importFirst(this._asList(this._config.three_urls).concat(this._config.three_url), "Three.js"),
-      this._importFirst(this._asList(this._config.gltf_loader_urls).concat(this._config.gltf_loader_url), "GLTFLoader"),
-      this._importFirst(this._asList(this._config.obj_loader_urls).concat(this._config.obj_loader_url), "OBJLoader"),
-      this._importFirst(this._asList(this._config.orbit_controls_urls).concat(this._config.orbit_controls_url), "OrbitControls"),
-    ]).then(([THREE, gltfModule, objModule, controlsModule]) => {
+    this._threeModulesPromise = (async () => {
+      // 1. Try a single local bundle (offline-safe). Users copy dist/three.bundle.min.js
+      //    to their HA /local/ directory alongside the card.
+      const bundleUrls = this._asList(this._config.three_bundle_urls).concat(
+        this._config.three_bundle_url ? [this._config.three_bundle_url] : []
+      );
+      for (const url of bundleUrls) {
+        try {
+          const mod = await import(url);
+          if (mod.GLTFLoader && mod.OBJLoader && mod.OrbitControls) {
+            this._threeModules = { THREE: mod, GLTFLoader: mod.GLTFLoader, OBJLoader: mod.OBJLoader, OrbitControls: mod.OrbitControls };
+            return this._threeModules;
+          }
+        } catch (_) {
+          // bundle not found — fall through to individual CDN imports
+        }
+      }
+
+      // 2. Fall back to loading four separate modules (requires internet).
+      const [THREE, gltfModule, objModule, controlsModule] = await Promise.all([
+        this._importFirst(this._asList(this._config.three_urls).concat(this._config.three_url), "Three.js"),
+        this._importFirst(this._asList(this._config.gltf_loader_urls).concat(this._config.gltf_loader_url), "GLTFLoader"),
+        this._importFirst(this._asList(this._config.obj_loader_urls).concat(this._config.obj_loader_url), "OBJLoader"),
+        this._importFirst(this._asList(this._config.orbit_controls_urls).concat(this._config.orbit_controls_url), "OrbitControls"),
+      ]);
       this._threeModules = {
         THREE,
         GLTFLoader: gltfModule.GLTFLoader,
@@ -3430,7 +3458,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         OrbitControls: controlsModule.OrbitControls,
       };
       return this._threeModules;
-    });
+    })();
 
     return this._threeModulesPromise;
   }
@@ -3454,8 +3482,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       scene.background = new THREE.Color(String(background).trim() || "#111827");
 
       const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 10000);
-      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      const antialias = this._config.model_antialias !== false;
+      const configuredPixelRatio = Number(this._config.model_pixel_ratio);
+      const pixelRatio = Number.isFinite(configuredPixelRatio) && configuredPixelRatio > 0
+        ? Math.min(configuredPixelRatio, 3)
+        : Math.min(window.devicePixelRatio || 1, 2);
+      const renderer = new THREE.WebGLRenderer({ antialias, alpha: false });
+      renderer.setPixelRatio(pixelRatio);
       if ("outputColorSpace" in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.domElement.style.touchAction = "none";
       renderer.domElement.style.userSelect = "none";
@@ -3569,23 +3602,39 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         renderer.setSize(width, height, false);
         return true;
       };
-      const resizeObserver = new ResizeObserver(resize);
+      let disposed = false;
+      let needsRender = true;
+
+      // Trigger a render whenever the camera moves (including damping deceleration).
+      controls.addEventListener("change", () => { needsRender = true; });
+      // Expose a setter so external callers (HA state updates) can request a frame.
+      const requestRender = () => { needsRender = true; };
+
+      const resizeObserver = new ResizeObserver(() => {
+        if (resize()) needsRender = true;
+      });
       resizeObserver.observe(container);
       resize();
       requestAnimationFrame(resize);
       window.setTimeout(resize, 250);
 
-      let disposed = false;
       const animate = () => {
         if (disposed || renderToken !== this._modelRenderToken) return;
-        resize();
+        // Schedule next frame first so early returns don't stall the loop.
+        this._modelViewer.animationFrame = requestAnimationFrame(animate);
+        // Skip all work while the browser tab is hidden — visibilitychange will
+        // trigger a fresh render when the tab comes back into focus.
+        if (document.hidden) return;
+        // OrbitControls.update() must be called every frame when damping is on;
+        // it fires a 'change' event (→ needsRender = true) while still decelerating.
         controls.update();
+        if (!needsRender) return;
+        needsRender = false;
         this._captureModelCameraState();
         this._update3DMarkerButtons(this._modelViewer?.markerButtons || markerButtons, THREE, camera, container);
         this._update3DZoneLabels(this._modelViewer?.zoneLabels || [], THREE, camera, container);
         this._update3DZonePointButtons(this._modelViewer?.zonePointButtons, THREE, camera, container);
         renderer.render(scene, camera);
-        this._modelViewer.animationFrame = requestAnimationFrame(animate);
       };
 
       this._modelViewer = {
@@ -3600,6 +3649,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         zoneGroup,
         offlineFocusDistance,
         animationFrame: 0,
+        requestRender,
         dispose: () => {
           disposed = true;
         },
@@ -3638,6 +3688,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         reject
       );
     });
+  }
+
+  /** Ask the animate loop to render one more frame (e.g. after a HA state update). */
+  _requestRender() {
+    this._modelViewer?.requestRender?.();
   }
 
   _captureModelCameraState() {
@@ -3799,7 +3854,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (!this._modelViewer?.container || !this._modelViewer?.THREE || !this._modelViewer?.camera) return;
     const markerLayer = this._modelViewer.container.querySelector("[data-model-marker-layer]");
     this._modelViewer.markerButtons = this._build3DMarkerButtons(markerLayer, this._modelViewer.THREE, this._modelViewer.camera);
-    this._refresh3DZoneOverlay();
+    this._refresh3DZoneOverlay(); // also calls _requestRender()
     this._updateDeviceRowsAfterMarkerChange();
     this._refreshOfflineAlert();
   }
@@ -3854,6 +3909,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     }
     this._refresh3DZoneLabels();
     this._refresh3DZonePointOverlay();
+    this._requestRender();
   }
 
   _zoneMesh(THREE, zone, opacity, color = zone.color || "#f8d66d", options = {}) {

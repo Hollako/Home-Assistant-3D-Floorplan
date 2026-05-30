@@ -3366,6 +3366,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return [
       "ambient_darkness:",
       ...(ambient.entity ? [`  entity: ${ambient.entity}`] : []),
+      `  day_opacity: ${ambient.day_opacity}`,
+      `  night_opacity: ${ambient.night_opacity}`,
     ];
   }
 
@@ -4494,11 +4496,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     controls.update();
   }
 
-  _disposeModelViewer() {
+  _disposeModelViewer({ preserveCamera = false } = {}) {
     this._modelRenderToken += 1;
     if (!this._modelViewer) return;
     const { scene, renderer, controls, resizeObserver, animationFrame, dispose } = this._modelViewer;
-    this._captureModelCameraState();
+    if (!preserveCamera) this._captureModelCameraState();
     dispose?.();
     if (animationFrame) cancelAnimationFrame(animationFrame);
     resizeObserver?.disconnect();

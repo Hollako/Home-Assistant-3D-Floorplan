@@ -1,4 +1,4 @@
-# Home Assistant 3D Floorplan
+﻿# Home Assistant 3D Floorplan
 
 ![Home Assistant 3D Floorplan preview](images/preview.png)
 
@@ -36,9 +36,9 @@ markers: []
 
 The card uses the standard Three.js / GLTF coordinate convention:
 
-- **X** — east/west floor axis
-- **Y** — vertical (height)
-- **Z** — north/south floor axis
+- **X** - east/west floor axis
+- **Y** - vertical (height)
+- **Z** - north/south floor axis
 
 This matches `.glb` files exported from Blender with the default Y-up orientation. No `coordinate_map` override is needed for standard exports.
 
@@ -61,7 +61,7 @@ edit_marker_hold_action: move
 marker_hold_ms: 650
 ```
 
-`auto` uses domain defaults — lights and switches toggle on tap; sensors, binary sensors, and climate entities open more-info. Edit Mode is shown only when `hass.user.is_admin === true`.
+`auto` uses domain defaults - lights and switches toggle on tap; sensors, binary sensors, and climate entities open more-info. Edit Mode is shown only when `hass.user.is_admin === true`.
 
 Markers export as:
 
@@ -90,9 +90,9 @@ marker_display: value   # auto | icon | value
 
 Switch to Edit Mode to place and configure markers.
 
-**Sidebar** — lists all HA entities. Placed markers show a **Remove** button. Unplaced markers show **Add**; clicking it then clicking the 3D model places the marker at that surface point.
+**Sidebar** - lists all HA entities. Placed markers show a **Remove** button. Unplaced markers show **Add**; clicking it then clicking the 3D model places the marker at that surface point.
 
-**Floating panel** — selecting a placed marker opens a panel on the right with:
+**Floating panel** - selecting a placed marker opens a panel on the right with:
 - Icon picker
 - Marker display setting
 - Tap / Hold actions
@@ -100,16 +100,16 @@ Switch to Edit Mode to place and configure markers.
 - XYZ coordinates
 - Move / Delete buttons
 
-**Axes gizmo** — a small XYZ orientation indicator appears in the top-left corner in Edit Mode, showing how the model axes relate to the camera.
+**Axes gizmo** - a small XYZ orientation indicator appears in the top-left corner in Edit Mode, showing how the model axes relate to the camera.
 
-**Export YAML** — the sidebar exports the full card YAML with current marker positions, zone definitions, and presets. Press **Copy YAML** to copy it to the clipboard.
+**Export YAML** - the sidebar exports the full card YAML with current marker positions, zone definitions, and presets. Press **Copy YAML** to copy it to the clipboard.
 
 ## Camera Views
 
 The compass in the corner provides:
 
-- **Top** — straight top-down view
-- **N / E / S / W** — 45-degree angled side views
+- **Top** - straight top-down view
+- **N / E / S / W** - 45-degree angled side views
 
 In Edit Mode, **Save Home** stores the current camera position as the startup view. The saved view is stored per-floor and is written to the YAML export:
 
@@ -128,9 +128,9 @@ Edit Mode can define room polygons that drive the 3D lighting render. Press **Ad
 
 Each zone has two modes, selectable in the zone settings:
 
-**Area (zone-wide glow)** — a single flat ambient fill covers the whole floor polygon. Suitable for zones with diffuse overhead lighting or when no individual light positions are needed.
+**Area (zone-wide glow)** - a single flat ambient fill covers the whole floor polygon. Suitable for zones with diffuse overhead lighting or when no individual light positions are needed.
 
-**Positional (per-light pools)** — each `light.*` marker placed inside the zone creates its own floor pool, wall glow, ceiling glow, and GI bounce based on its position and light type.
+**Positional (per-light pools)** - each `light.*` marker placed inside the zone creates its own floor pool, wall glow, ceiling glow, and GI bounce based on its position and light type.
 
 ### Zone Settings
 
@@ -155,7 +155,7 @@ brightness_zones:
         y: -1100.0000
 ```
 
-**Illuminance sensor** — when enabled, the shade is driven dynamically by a lux sensor. Low lux approaches night shade; 300 lux reaches day shade; brighter reduces shade further. The sensor is selected from a searchable dropdown of all `sensor.*` and `input_number.*` entities. Falls back to `sun.sun` day/night when disabled or sensor is unavailable.
+**Illuminance sensor** - when enabled, the shade is driven dynamically by a lux sensor. Low lux approaches night shade; 300 lux reaches day shade; brighter reduces shade further. The sensor is selected from a searchable dropdown of all `sensor.*` and `input_number.*` entities. Falls back to `sun.sun` day/night when disabled or sensor is unavailable.
 
 ## Light Types (Positional Mode)
 
@@ -174,12 +174,12 @@ Set **Light radius** to override the auto-computed pool size (in model units). L
 
 Linear and Cove lights support a drawn path that distributes sample points along the strip:
 
-- **Draw line** — click the 3D model to add path points one by one
-- **Rectangle** — define width, depth, and rotation; the card generates a closed 4-corner loop automatically. The marker position becomes the rectangle center.
+- **Draw line** - click the 3D model to add path points one by one
+- **Rectangle** - define width, depth, and rotation; the card generates a closed 4-corner loop automatically. The marker position becomes the rectangle center.
 
 ### Sub-spots (Spot)
 
-A spot marker can contain multiple render-only sub-spots — extra light positions that share the parent entity state but each have their own XYZ position and render parameters. Useful for a single HA entity that controls a row of ceiling spots.
+A spot marker can contain multiple render-only sub-spots - extra light positions that share the parent entity state but each have their own XYZ position and render parameters. Useful for a single HA entity that controls a row of ceiling spots.
 
 ## Render Parameters
 
@@ -226,10 +226,10 @@ Hovering over any parameter value shows a tooltip with a description and which l
 
 Parameter sets can be saved as named presets and reused across lights:
 
-- **Save as preset** — prompts for a name and stores the current resolved values
-- **Reset** — clears all per-light overrides and returns to type defaults
-- **Export** — downloads the resolved parameters as a `.json` file
-- **Import** — loads a previously exported `.json` and applies it to the current light
+- **Save as preset** - prompts for a name and stores the current resolved values
+- **Reset** - clears all per-light overrides and returns to type defaults
+- **Export** - downloads the resolved parameters as a `.json` file
+- **Import** - loads a previously exported `.json` and applies it to the current light
 
 Presets are saved to `localStorage` and survive JavaScript file updates. The YAML export also includes the `light_presets:` block so they can be committed to the card config:
 
@@ -294,7 +294,7 @@ Use matching files from Three.js release `0.165.0`.
 
 ## Performance Notes
 
-- Use `.glb` format — single file, browser-optimised, carries geometry, materials, and textures together
-- Zone polygon complexity affects floor pool rendering — simpler polygons with fewer vertices render faster
+- Use `.glb` format - single file, browser-optimised, carries geometry, materials, and textures together
+- Zone polygon complexity affects floor pool rendering - simpler polygons with fewer vertices render faster
 - Increase `light_radius` and reduce sample count for Linear/Cove lights covering large areas
 - The GI bounce (`gi_brightness`) is disabled by default; enable only where the extra ambient fill is visible

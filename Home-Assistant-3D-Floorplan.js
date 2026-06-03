@@ -1,4 +1,4 @@
-﻿const VERSION = "2.0.0";
+﻿const VERSION = "2.8.24";
 class HomeAssistant3DFloorplan extends HTMLElement {
   static getConfigElement() {
     return document.createElement("home-assistant-3d-floorplan-editor");
@@ -47,6 +47,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._placementMode = "auto";
     this._sidebarCollapsed = false;
     this._sidebarTab = "markers";
+    this._filtersCollapsed = true;
     this._zoom = 1;
     this._exportOpen = false;
     this._display = {
@@ -67,7 +68,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._isJumping = false;
     this._suppressMapRestoreUntil = 0;
     this._selectedMarkers = new Set();
+    this._advancedRenderParamsOpen = new Set();
     this._pendingDeviceKey = null;
+    this._pendingSubSpot = null;
+    this._pendingLightPath = null;
     this._dragMarkerKey = null;
     this._selectionBox = null;
     this._selectionBoxElement = null;
@@ -76,6 +80,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._history = {};
     this._historyLimit = 30;
     this._modelViewer = null;
+    this._modelKeyboardNavigationActive = false;
     this._modelRenderToken = 0;
     this._modelCameraState = null;
     this._modelDefaultViews = {};
@@ -110,8 +115,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       edit_marker_hold_action: "move",
       marker_hold_ms: 650,
       offline_focus_distance: 2,
-      coordinate_map: { x: "z", y: "x", z: "y" },
-      vertical_axis: "z",
+      coordinate_map: { x: "x", y: "y", z: "z" },
+      vertical_axis: "y",
+      light_presets: {},
       model_background: "",
       ambient_darkness: {
         entity: "sun.sun",
@@ -151,6 +157,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._markers = this._floorMarkers[this._activeFloorId] || {};
     this._floorZones = this._mergedFloorZones(this._configFloorZones(), this._loadZones());
     this._zones = this._floorZones[this._activeFloorId] || {};
+    // Merge saved presets (localStorage) on top of config presets (YAML) so user presets survive JS updates
+    this._config.light_presets = { ...(this._config.light_presets || {}), ...this._loadPresets() };
     this._render();
   }
 
@@ -178,13 +186,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   }
 
   connectedCallback() {
-    window.addEventListener("keydown", this._boundKeydown);
+    window.addEventListener("keydown", this._boundKeydown, { capture: true });
     document.addEventListener("visibilitychange", this._boundVisibilityChange);
     this._queueModelViewerRecovery();
   }
 
   disconnectedCallback() {
-    window.removeEventListener("keydown", this._boundKeydown);
+    window.removeEventListener("keydown", this._boundKeydown, { capture: true });
     document.removeEventListener("visibilitychange", this._boundVisibilityChange);
     window.clearTimeout(this._modelRecoveryTimer);
     this._disposeModelViewer();
@@ -237,9 +245,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   }
 
   _handleKeydown(event) {
-    if (!(this._canEdit() && this._mode === "edit")) return;
+    const path = event.composedPath?.() || [];
+    if (path.some((node) => ["INPUT", "SELECT", "TEXTAREA"].includes(node?.tagName) || node?.isContentEditable)) return;
     const active = this.shadowRoot?.activeElement || document.activeElement;
     if (["INPUT", "SELECT", "TEXTAREA"].includes(active?.tagName)) return;
+    if (this._handle3DNavigationKey(event)) return;
+    if (!(this._canEdit() && this._mode === "edit")) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
       event.preventDefault();
       this._undoLastMarkerChange();
@@ -252,10 +263,58 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._pushMarkerHistory();
     for (const key of this._selectedMarkers) {
       delete this._markers[key];
+      if (this._pendingSubSpot?.key === key) this._pendingSubSpot = null;
+      if (this._pendingLightPath?.key === key) this._pendingLightPath = null;
     }
     this._selectedMarkers.clear();
     this._saveMarkers();
     this._render();
+  }
+
+  _handle3DNavigationKey(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
+    const key = String(event.key || "").toLowerCase();
+    if (!["w", "a", "s", "d", "q", "e"].includes(key)) return false;
+    if (!this._modelKeyboardNavigationActive) return false;
+    const viewer = this._modelViewer;
+    if (!viewer?.camera || !viewer?.controls || !viewer?.THREE) return false;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    const { THREE, camera, controls } = viewer;
+    const verticalModelAxis = this._coordinateMap()[this._verticalAxis()] || "y";
+    const up = new THREE.Vector3(
+      verticalModelAxis === "x" ? 1 : 0,
+      verticalModelAxis === "y" ? 1 : 0,
+      verticalModelAxis === "z" ? 1 : 0
+    );
+    const flatten = (vector) => {
+      const result = vector.clone().sub(up.clone().multiplyScalar(vector.dot(up)));
+      return result.lengthSq() > 0.000001 ? result.normalize() : result;
+    };
+    let right = flatten(new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0));
+    let forward = flatten(camera.getWorldDirection(new THREE.Vector3()));
+    if (!right.lengthSq()) right = new THREE.Vector3(1, 0, 0);
+    if (!forward.lengthSq()) forward = flatten(new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1));
+    if (!forward.lengthSq()) forward = new THREE.Vector3().crossVectors(up, right).normalize();
+
+    const distance = Math.max(1, camera.position.distanceTo(controls.target));
+    const step = distance * (event.shiftKey ? 0.12 : 0.045);
+    const move = new THREE.Vector3();
+    if (key === "w") move.add(forward.multiplyScalar(step));
+    if (key === "s") move.add(forward.multiplyScalar(-step));
+    if (key === "d") move.add(right.multiplyScalar(step));
+    if (key === "a") move.add(right.multiplyScalar(-step));
+    if (key === "e") move.add(up.clone().multiplyScalar(step));
+    if (key === "q") move.add(up.clone().multiplyScalar(-step));
+
+    camera.position.add(move);
+    controls.target.add(move);
+    controls.update();
+    this._captureModelCameraState();
+    this._requestRender();
+    return true;
   }
 
   async _loadRegistries(hass) {
@@ -496,6 +555,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
   }
 
+  _activeFilterCount() {
+    return ["placement", "availability", "domain", "integration", "area"].reduce((count, key) => {
+      const value = this._filters[key];
+      return count + (value && value !== "all" ? 1 : 0);
+    }, 0);
+  }
+
   _configMarkers() {
     return this._markersFromList(this._config.markers || []);
   }
@@ -525,6 +591,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         tapAction: this._normalizeMarkerAction(marker.tap_action || marker.tapAction, "tap"),
         holdAction: this._normalizeMarkerAction(marker.hold_action || marker.holdAction, "hold"),
         lightIntensity: this._normalizeLightIntensity(marker.light_intensity ?? marker.lightIntensity),
+        lightType: this._normalizeLightType(marker.light_type ?? marker.lightType),
+        lightRadius: this._normalizeLightRadius(marker.light_radius ?? marker.lightRadius),
+        lightPreset: marker.light_preset || marker.lightPreset || "",
+        renderParams: marker.render_params || marker.renderParams || {},
+        subSpots: this._normalizedSubSpots(marker.sub_spots || marker.subSpots, marker),
+        lightPath: this._normalizedLightPath(marker.light_path || marker.lightPath, marker),
+        lightShape: marker.light_shape || marker.lightShape || "path",
+        lightRect: marker.light_rect || marker.lightRect || { width: 100, depth: 80, angle: 0 },
         x: Number(point.x),
         y: Number(point.y),
         z: Number(point.z),
@@ -551,12 +625,56 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         tapAction: this._normalizeMarkerAction(marker.tapAction || marker.tap_action, "tap"),
         holdAction: this._normalizeMarkerAction(marker.holdAction || marker.hold_action, "hold"),
         lightIntensity: this._normalizeLightIntensity(marker.lightIntensity ?? marker.light_intensity),
+        lightType: this._normalizeLightType(marker.lightType ?? marker.light_type),
+        lightRadius: this._normalizeLightRadius(marker.lightRadius ?? marker.light_radius),
+        lightPreset: marker.lightPreset || marker.light_preset || "",
+        renderParams: marker.renderParams || marker.render_params || {},
+        subSpots: this._normalizedSubSpots(marker.subSpots || marker.sub_spots, marker),
+        lightPath: this._normalizedLightPath(marker.lightPath || marker.light_path, marker),
+        lightShape: marker.lightShape || marker.light_shape || "path",
+        lightRect: marker.lightRect || marker.light_rect || { width: 100, depth: 80, angle: 0 },
         x: is3DMarker ? x : Math.max(0, Math.min(100, x)),
         y: is3DMarker ? y : Math.max(0, Math.min(100, y)),
         ...(is3DMarker ? { z } : {}),
       };
       return result;
     }, {});
+  }
+
+  _normalizedSubSpots(subSpots, parentMarker = {}) {
+    const parentUsesDisplay = parentMarker.coordinate_space === "display";
+    return (subSpots || [])
+      .map((spot, index) => {
+        const sourcePoint = parentUsesDisplay || spot?.coordinate_space === "display" ? this._displayToModelPoint(spot) : spot;
+        const x = Number(sourcePoint?.x);
+        const y = Number(sourcePoint?.y);
+        const z = Number(sourcePoint?.z);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+        return {
+          name: spot?.name || `Spot ${index + 1}`,
+          lightRadius: this._normalizeLightRadius(spot?.light_radius ?? spot?.lightRadius),
+          lightPreset: spot?.light_preset || spot?.lightPreset || "",
+          renderParams: spot?.render_params || spot?.renderParams || {},
+          x,
+          y,
+          z,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  _normalizedLightPath(points, parentMarker = {}) {
+    const parentUsesDisplay = parentMarker.coordinate_space === "display";
+    return (points || [])
+      .map((point) => {
+        const sourcePoint = parentUsesDisplay || point?.coordinate_space === "display" ? this._displayToModelPoint(point) : point;
+        const x = Number(sourcePoint?.x);
+        const y = Number(sourcePoint?.y);
+        const z = Number(sourcePoint?.z);
+        if (!this._isSafeModelPoint({ x, y, z })) return null;
+        return { x, y, z };
+      })
+      .filter(Boolean);
   }
 
   _storageKey() {
@@ -581,6 +699,91 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const path = window.location?.pathname || "dashboard";
     const cardKey = this._config.storage_key || this._config.title || "home-assistant-3d-floorplan";
     return `home-assistant-3d-floorplan:model-default-view:${path}:${cardKey}`;
+  }
+
+  _presetsStorageKey() {
+    const path = window.location?.pathname || "dashboard";
+    const cardKey = this._config.storage_key || this._config.title || "home-assistant-3d-floorplan";
+    return `home-assistant-3d-floorplan:light-presets:${path}:${cardKey}`;
+  }
+
+  _loadPresets() {
+    try {
+      const value = localStorage.getItem(this._presetsStorageKey());
+      return value ? JSON.parse(value) : {};
+    } catch (error) {
+      console.warn("home-assistant-3d-floorplan: light presets could not be loaded", error);
+      return {};
+    }
+  }
+
+  _savePresets() {
+    try {
+      localStorage.setItem(this._presetsStorageKey(), JSON.stringify(this._config.light_presets || {}));
+    } catch (error) {
+      console.warn("home-assistant-3d-floorplan: light presets could not be saved", error);
+    }
+    this._refreshYamlExport();
+  }
+
+  /** Exports markers, zones and light presets to a downloadable JSON file. */
+  _exportSettingsFile() {
+    const data = {
+      version: VERSION,
+      exported_at: new Date().toISOString(),
+      markers: this._markers || {},
+      zones: this._zones || {},
+      light_presets: this._config.light_presets || {},
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `floorplan-settings-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    const status = this.shadowRoot?.querySelector("[data-settings-io-status]");
+    if (status) {
+      status.textContent = "Exported!";
+      window.setTimeout(() => { if (status.textContent === "Exported!") status.textContent = ""; }, 2000);
+    }
+  }
+
+  /** Imports markers, zones and presets from a JSON file exported by _exportSettingsFile. */
+  _importSettingsFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const status = this.shadowRoot?.querySelector("[data-settings-io-status]");
+      try {
+        const data = JSON.parse(e.target.result);
+        if (data.markers) {
+          this._markers = this._normalizedMarkers(data.markers);
+          this._floorMarkers[this._activeFloorId] = this._markers;
+          this._saveMarkers();
+        }
+        if (data.zones) {
+          this._zones = this._normalizedZones(data.zones);
+          this._floorZones[this._activeFloorId] = this._zones;
+          this._saveZones();
+        }
+        if (data.light_presets) {
+          this._config.light_presets = { ...(this._config.light_presets || {}), ...data.light_presets };
+          this._savePresets();
+        }
+        this._refresh3DMarkerOverlay();
+        this._refresh3DZoneOverlay();
+        this._render();
+        if (status) {
+          status.textContent = "Imported!";
+          window.setTimeout(() => { if (status.textContent === "Imported!") status.textContent = ""; }, 2000);
+        }
+      } catch (err) {
+        console.error("home-assistant-3d-floorplan: settings import failed", err);
+        if (status) status.textContent = "Import failed!";
+      }
+    };
+    reader.readAsText(file);
   }
 
   _loadMarkers() {
@@ -655,6 +858,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         illuminanceEnabled: zone.illuminance_enabled === true || zone.illuminanceEnabled === true || Boolean(zone.illuminance?.enabled),
         illuminanceEntity: zone.illuminance_entity || zone.illuminanceEntity || zone.illuminance?.entity || "",
         showLux: zone.show_lux === true || zone.showLux === true || zone.illuminance?.show_lux === true,
+        lightingMode: zone.lighting_mode || zone.lightingMode || "area",
         points: (zone.points || []).map((point) => this._zoneDisplayPointToModel(point)),
       };
       return zones;
@@ -892,6 +1096,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         illuminanceEnabled: zone.illuminanceEnabled === true || zone.illuminance_enabled === true || Boolean(zone.illuminance?.enabled),
         illuminanceEntity: zone.illuminanceEntity || zone.illuminance_entity || zone.illuminance?.entity || "",
         showLux: zone.showLux === true || zone.show_lux === true || zone.illuminance?.show_lux === true,
+        lightingMode: zone.lightingMode || zone.lighting_mode || "area",
         points,
       };
       return result;
@@ -932,11 +1137,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   }
 
   _zoneDisplayPointToModel(point) {
-    return this._displayToModelPoint({
-      x: Number(point?.x),
-      y: Number(point?.y),
-      z: 0,
-    });
+    // Keep all floor-plane axes; zero out only the vertical axis so zone points
+    // stay on the floor regardless of where the user clicked in 3D space.
+    const displayPoint = { x: Number(point?.x), y: Number(point?.y), z: Number(point?.z) };
+    displayPoint[this._verticalAxis()] = 0;
+    return this._displayToModelPoint(displayPoint);
   }
 
   _zoneId(value, existing = this._zones) {
@@ -1020,19 +1225,27 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                 : `
             <div class="sidebar-tab-panel markers-panel">
               <section class="filters">
-                ${this._select("placement", "Placement", [
-                  ["all", "All placements"],
-                  ["placed", "Placed"],
-                  ["unplaced", "Unplaced"],
-                ])}
-                ${this._select("availability", "Availability", [
-                  ["all", "All"],
-                  ["offline", "Offline"],
-                  ["online", "Online"],
-                ])}
-                ${this._select("domain", "Domain", [["all", "All domains"], ...this._options(rows, "domains").map((value) => [value, value])])}
-                ${this._select("integration", "Integration", [["all", "All integrations"], ...this._options(rows, "integrations").map((value) => [value, value])])}
-                ${this._select("area", "Area", [["all", "All areas"], ...this._options(rows, "areaName").map((value) => [value, value])])}
+                <button type="button" class="filters-toggle" data-filters-toggle aria-expanded="${this._filtersCollapsed ? "false" : "true"}">
+                  <span>Filters</span>
+                  <span>${this._activeFilterCount() ? `${this._activeFilterCount()} active` : "All"}</span>
+                </button>
+                ${this._filtersCollapsed ? "" : `
+                <div class="filters-options">
+                  ${this._select("placement", "Placement", [
+                    ["all", "All placements"],
+                    ["placed", "Placed"],
+                    ["unplaced", "Unplaced"],
+                  ])}
+                  ${this._select("availability", "Availability", [
+                    ["all", "All"],
+                    ["offline", "Offline"],
+                    ["online", "Online"],
+                  ])}
+                  ${this._select("domain", "Domain", [["all", "All domains"], ...this._options(rows, "domains").map((value) => [value, value])])}
+                  ${this._select("integration", "Integration", [["all", "All integrations"], ...this._options(rows, "integrations").map((value) => [value, value])])}
+                  ${this._select("area", "Area", [["all", "All areas"], ...this._options(rows, "areaName").map((value) => [value, value])])}
+                </div>
+                `}
                 <label>
                   <span>Search</span>
                   <input data-filter="search" value="${this._escape(this._filters.search)}" placeholder="Device, entity, area..." />
@@ -1142,6 +1355,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               ${this._modelCompassTemplate()}
               ${isEditing ? `<div class="selected-marker-panel" data-selected-marker-panel>${this._selectedMarkerPanel()}</div>` : ""}
               <div class="model-status" data-model-status>${isEditing ? "Select an entity, then click the 3D model to place it." : "Loading 3D model..."}</div>
+              <div class="version-badge">v${VERSION}</div>
+              ${isEditing ? `<canvas class="axes-gizmo" data-axes-gizmo></canvas><div class="axes-legend">${this._axesLegendHTML()}</div>` : ""}
             </div>
             `
                 : `<div class="missing-image">Add a model URL in the card YAML.</div>`
@@ -1331,6 +1546,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       });
     });
 
+    this.shadowRoot.querySelectorAll("[data-filters-toggle]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._filtersCollapsed = !this._filtersCollapsed;
+        this._render();
+      });
+    });
+
     this.shadowRoot.querySelectorAll("[data-device]").forEach((element) => {
       element.addEventListener("click", (event) => {
         if (!isEditing) return;
@@ -1344,8 +1567,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         }
         this.shadowRoot.querySelectorAll("[data-device]").forEach((row) => {
           row.classList.toggle("is-pending", row.dataset.device === this._pendingDeviceKey);
-          const badge = row.querySelector(".placed");
-          if (badge && !row.classList.contains("is-placed")) badge.textContent = row.dataset.device === this._pendingDeviceKey ? "Click model" : "Select";
+          const badge = row.querySelector(".select-marker");
+          if (badge && !row.classList.contains("is-placed")) badge.textContent = row.dataset.device === this._pendingDeviceKey ? "Click model…" : "Add";
         });
       });
       element.addEventListener("dragstart", (event) => {
@@ -1367,8 +1590,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         delete this._markers[key];
         this._selectedMarkers.delete(key);
         if (this._pendingDeviceKey === key) this._pendingDeviceKey = null;
+        if (this._pendingSubSpot?.key === key) this._pendingSubSpot = null;
+        if (this._pendingLightPath?.key === key) this._pendingLightPath = null;
         this._saveMarkers();
         this._refresh3DMarkerOverlay();
+        this._refresh3DZoneOverlay();
+        this._refreshSelectedMarkerPanel();
         event.currentTarget.closest("[data-device]")?.classList.remove("is-placed", "is-pending");
       });
     });
@@ -1389,6 +1616,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-copy-yaml]").forEach((element) => {
       element.addEventListener("click", () => this._copyYamlExport());
     });
+
 
     this.shadowRoot.querySelectorAll("[data-icon]").forEach((element) => {
       element.addEventListener("pointerdown", (event) => event.stopPropagation());
@@ -1428,6 +1656,147 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       });
     });
 
+    this.shadowRoot.querySelectorAll("[data-light-type]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.lightType;
+        if (!this._markers[key]) return;
+        this._markers[key].lightType = this._normalizeLightType(event.currentTarget.value);
+        if ((this._markers[key].lightType || "spot") !== "spot" && this._pendingSubSpot?.key === key) this._pendingSubSpot = null;
+        if (!this._supportsLightPath(this._markers[key].lightType) && this._pendingLightPath?.key === key) this._pendingLightPath = null;
+        this._saveMarkers();
+        this._refresh3DMarkerOverlay();
+        this._refresh3DZoneOverlay();
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-light-radius]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      const onRadiusChange = (event) => {
+        const key = event.currentTarget.dataset.lightRadius;
+        if (!this._markers[key]) return;
+        const val = this._normalizeLightRadius(event.currentTarget.value) || 1.5;
+        this._markers[key].lightRadius = val;
+        this._refresh3DZoneOverlay();
+      };
+      element.addEventListener("input", onRadiusChange);
+      element.addEventListener("change", (event) => {
+        onRadiusChange(event);
+        this._saveMarkers();
+      });
+    });
+
+    // Render preset selector
+    this.shadowRoot.querySelectorAll("[data-light-preset]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.lightPreset;
+        if (!this._markers[key]) return;
+        this._markers[key].lightPreset = event.currentTarget.value;
+        this._saveMarkers();
+        this._refresh3DZoneOverlay();
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-toggle-render-advanced]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.toggleRenderAdvanced;
+        if (!key) return;
+        if (this._advancedRenderParamsOpen.has(key)) this._advancedRenderParamsOpen.delete(key);
+        else this._advancedRenderParamsOpen.add(key);
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+        else this._refreshDeviceRow(key);
+      });
+    });
+
+    this._bindRenderParamControls(this.shadowRoot);
+
+    // Export render params to JSON file
+    this.shadowRoot.querySelectorAll("[data-export-render-params]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.exportRenderParams;
+        const marker = this._markers[key];
+        if (!marker) return;
+        const name = (marker.name || key).replace(/[^a-z0-9_-]/gi, "_");
+        const data = {
+          lightType: this._normalizeLightType(marker.lightType) || "spot",
+          lightPreset: marker.lightPreset || "",
+          renderParams: this._resolveRenderParams(marker),
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `light-params-${name}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    });
+
+    // Import render params from JSON file
+    this.shadowRoot.querySelectorAll("[data-import-render-params]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.importRenderParams;
+        const file = event.currentTarget.files[0];
+        if (!file || !this._markers[key]) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const data = JSON.parse(e.target.result);
+            const params = data.renderParams || data;
+            const cleaned = this._cleanRenderPresetParams(params);
+            this._markers[key].renderParams = cleaned;
+            if (data.lightPreset) this._markers[key].lightPreset = data.lightPreset;
+            this._saveMarkers();
+            this._refresh3DZoneOverlay();
+            if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+          } catch (err) {
+            console.error("home-assistant-3d-floorplan: render params import failed", err);
+          }
+        };
+        reader.readAsText(file);
+        event.currentTarget.value = "";
+      });
+    });
+
+    // Reset render params to built-in defaults
+    this.shadowRoot.querySelectorAll("[data-reset-render-params]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.resetRenderParams;
+        if (!this._markers[key]) return;
+        this._markers[key].renderParams = {};
+        this._markers[key].lightPreset = "";
+        this._saveMarkers();
+        this._refresh3DZoneOverlay();
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
+    // Save current params as a named preset
+    this.shadowRoot.querySelectorAll("[data-save-render-preset]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.saveRenderPreset;
+        const marker = this._markers[key];
+        if (!marker) return;
+        const name = window.prompt("Preset name:");
+        if (!name?.trim()) return;
+        const safeName = name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+        if (!this._config.light_presets) this._config.light_presets = {};
+        this._config.light_presets[safeName] = this._cleanRenderPresetParams(this._resolveRenderParams(marker));
+        marker.lightPreset = safeName;
+        this._savePresets();
+        this._saveMarkers();
+        this._refresh3DZoneOverlay();
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
     this.shadowRoot.querySelectorAll("[data-coordinate]").forEach((element) => {
       element.addEventListener("pointerdown", (event) => event.stopPropagation());
       element.addEventListener("change", (event) => {
@@ -1441,6 +1810,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         this._update3DMarkerCoordinate(key, axis, event.currentTarget.value, { skipHistory: true, skipSave: true, skipPanelRefresh: true });
       });
     });
+    this._bindSubSpotControls(this.shadowRoot);
+    this._bindLightPathControls(this.shadowRoot);
 
     this.shadowRoot.querySelectorAll("[data-placement-mode]").forEach((element) => {
       element.addEventListener("change", (event) => {
@@ -2232,13 +2603,20 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         <span>Height</span>
         <input data-zone-height="${this._escape(activeZone.id)}" type="number" step="0.01" value="${this._escape(this._formatCoordinate(this._zoneHeight(activeZone)))}" />
       </label>
+      <label>
+        <span>Lighting mode</span>
+        <select data-zone-lighting-mode="${this._escape(activeZone.id)}">
+          <option value="area" ${(activeZone.lightingMode || "area") === "area" ? "selected" : ""}>Area (zone-wide glow)</option>
+          <option value="positional" ${activeZone.lightingMode === "positional" ? "selected" : ""}>Positional (per-light pools)</option>
+        </select>
+      </label>
       ${this._zoneShadeTemplate(activeZone)}
       <div class="zone-actions">
         <button type="button" data-zone-draw="${this._escape(activeZone.id)}">${this._zoneDrawing && this._activeZoneId === activeZone.id ? "Stop Drawing" : "Draw"}</button>
         <button type="button" data-zone-clear="${this._escape(activeZone.id)}">Clear Points</button>
         <button type="button" data-zone-remove="${this._escape(activeZone.id)}">Remove</button>
       </div>
-      <small>${this._escape(activeZone.points.length)} point${activeZone.points.length === 1 ? "" : "s"}${this._zoneDrawing && this._activeZoneId === activeZone.id ? " - top view is locked; clicks save X/Y only." : ""}</small>
+      <small>${this._escape(activeZone.points.length)} point${activeZone.points.length === 1 ? "" : "s"}${this._zoneDrawing && this._activeZoneId === activeZone.id ? ` - top view locked; clicks save ${this._floorAxes().map((a) => a.toUpperCase()).join("/")} only.` : ""}</small>
       ${this._zonePointEditor(activeZone)}
       ` : ""}
     `;
@@ -2278,7 +2656,24 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           <input data-zone-illuminance-enabled="${this._escape(zone.id)}" type="checkbox" ${illuminanceEnabled ? "checked" : ""} />
         </label>
         <label class="zone-illuminance-entity">
-          <input data-zone-illuminance-entity="${this._escape(zone.id)}" value="${this._escape(zone.illuminanceEntity || "")}" placeholder="sensor.room_illuminance" ${illuminanceEnabled ? "" : "disabled"} />
+          <input
+            type="text"
+            list="illuminance-list-${this._escape(zone.id)}"
+            data-zone-illuminance-entity="${this._escape(zone.id)}"
+            value="${this._escape(zone.illuminanceEntity || "")}"
+            placeholder="Search sensor…"
+            autocomplete="off"
+            ${illuminanceEnabled ? "" : "disabled"}
+          />
+          <datalist id="illuminance-list-${this._escape(zone.id)}">
+            ${Object.keys(this._hass?.states || {})
+              .filter((id) => id.startsWith("sensor.") || id.startsWith("input_number."))
+              .sort()
+              .map((id) => {
+                const name = this._hass.states[id]?.attributes?.friendly_name || id;
+                return `<option value="${this._escape(id)}">${this._escape(name)}</option>`;
+              }).join("")}
+          </datalist>
         </label>
         <label class="zone-illuminance-toggle">
           <span>Show Lux Value</span>
@@ -2301,11 +2696,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           <button type="button" data-zone-point-remove="${this._escape(zone.id)}" data-zone-point-index="${selectedIndex}">Remove Point</button>
         </div>
         <div class="zone-coordinate-editor">
-          ${["x", "y"]
+          ${this._floorAxes()
             .map((axis) => `
           <label>
-            <span>${axis.toUpperCase()}</span>
-            <input data-zone-point-coordinate="${axis}" data-zone-point-key="${this._escape(zone.id)}" data-zone-point-index="${selectedIndex}" type="number" step="0.01" value="${this._escape(this._formatCoordinate(selectedPoint[axis]))}" />
+            <span>${this._axisLabelHTML(axis)}</span>
+            <input data-zone-point-coordinate="${axis}" data-zone-point-key="${this._escape(zone.id)}" data-zone-point-index="${selectedIndex}" type="number" step="1" value="${this._escape(this._formatCoordinateInteger(selectedPoint[axis]))}" />
           </label>
           `)
             .join("")}
@@ -2314,9 +2709,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           ${(zone.points || [])
             .map((point, index) => {
               const displayPoint = this._modelToDisplayPoint(point);
+              const [fa0, fa1] = this._floorAxes();
               return `
           <button type="button" data-zone-point-select="${this._escape(zone.id)}" data-zone-point-index="${index}" class="${index === selectedIndex ? "active" : ""}">
-            ${index + 1}. X ${this._escape(this._formatCoordinate(displayPoint.x))} / Y ${this._escape(this._formatCoordinate(displayPoint.y))}
+            ${index + 1}. ${fa0.toUpperCase()} ${this._escape(this._formatCoordinateInteger(displayPoint[fa0]))} / ${fa1.toUpperCase()} ${this._escape(this._formatCoordinateInteger(displayPoint[fa1]))}
           </button>
           `;
             })
@@ -2358,6 +2754,17 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         zone.name = event.currentTarget.value.trim() || zone.name;
         this._saveZones();
         this._refreshZoneTools();
+      });
+    });
+    root?.querySelectorAll("[data-zone-lighting-mode]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const zone = this._zones[event.currentTarget.dataset.zoneLightingMode];
+        if (!zone) return;
+        zone.lightingMode = event.currentTarget.value === "positional" ? "positional" : "area";
+        this._saveZones();
+        this._refreshZoneTools();
+        this._refresh3DZoneOverlay();
+        this._refreshSelectedMarkerPanel();
       });
     });
     root?.querySelectorAll("[data-zone-color]").forEach((element) => {
@@ -2511,6 +2918,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       illuminanceEnabled: false,
       illuminanceEntity: "",
       showLux: false,
+      lightingMode: "area",
       points: [],
     };
     this._setZoneDrawing(id, true);
@@ -2552,11 +2960,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _updateZonePointCoordinate(zoneId, index, axis, value) {
     const zone = this._zones[zoneId];
-    if (!zone || !zone.points[index] || !["x", "y"].includes(axis)) return;
+    if (!zone || !zone.points[index] || !this._floorAxes().includes(axis)) return;
     const number = Number(value);
     if (!Number.isFinite(number)) return;
     const displayPoint = this._modelToDisplayPoint(zone.points[index]);
-    displayPoint[axis] = Number(number.toFixed(4));
+    displayPoint[axis] = Math.round(number);
     zone.points[index] = this._zoneDisplayPointToModel(displayPoint);
     this._activeZoneId = zoneId;
     this._activeZonePointIndex = index;
@@ -2773,16 +3181,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         ${
           placed
             ? `<div class="row-actions">
-                <button type="button" class="edit-marker" data-edit-marker="${this._escape(row.key)}" title="Move marker">Move</button>
                 <button type="button" class="remove" data-remove="${this._escape(row.key)}" title="Remove from map">Remove</button>
               </div>`
-            : `<span class="placed">${this._pendingDeviceKey === row.key ? "Click model" : "Select"}</span>`
+            : `<button type="button" class="select-marker" data-pending-device="${this._escape(row.key)}">${this._pendingDeviceKey === row.key ? "Click model…" : "Add"}</button>`
         }
-        ${placed ? this._iconSelect(row) : ""}
-        ${placed ? this._markerDisplayEditor(row) : ""}
-        ${placed ? this._actionEditor(row) : ""}
-        ${placed ? this._lightIntensityEditor(row) : ""}
-        ${placed ? this._coordinateEditor(row) : ""}
     `;
   }
 
@@ -2815,12 +3217,304 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (row?.primaryDomain !== "light") return "";
     const marker = this._markers[row.key] || {};
     const intensity = this._normalizeLightIntensity(marker.lightIntensity);
+    const lightType = this._normalizeLightType(marker.lightType) || "spot";
+    const lightRadius = marker.lightRadius !== "" && marker.lightRadius !== undefined ? marker.lightRadius : "";
+
+    // Find the zone this marker belongs to
+    const zone = Object.values(this._zones || {}).find((z) => this._pointInZone(marker, z));
+    const zoneMode = zone?.lightingMode || "area";
+    const isPositional = zoneMode === "positional";
+
+    // User-defined presets from config
+    const userPresets = Object.keys(this._config.light_presets || {});
+    const currentPreset = marker.lightPreset || "";
+
+    // Render params (resolved) for showing current values in sliders
+    const rp = this._resolveRenderParams(marker);
+    const advancedOpen = this._advancedRenderParamsOpen.has(row.key);
+
     return `
       <label class="light-intensity-editor">
         <span>Light intensity</span>
         <input data-light-intensity="${this._escape(row.key)}" type="number" min="0" max="100" step="1" value="${this._escape(intensity)}" />
         <small>%</small>
       </label>
+      ${isPositional ? `
+      <label class="light-type-editor">
+        <span>Light type</span>
+        <select data-light-type="${this._escape(row.key)}">
+          <option value="spot" ${(!lightType || lightType === "spot") ? "selected" : ""}>Spot (ceiling downlight)</option>
+          <option value="cove" ${lightType === "cove" ? "selected" : ""}>Cove (indirect ceiling bounce)</option>
+          <option value="linear" ${lightType === "linear" ? "selected" : ""}>Linear (LED strip)</option>
+          <option value="lamp" ${lightType === "lamp" ? "selected" : ""}>Lamp (floor/table)</option>
+        </select>
+      </label>
+      ${lightType ? `
+      <label class="light-radius-editor">
+        <span>Light radius</span>
+        <input data-light-radius="${this._escape(row.key)}" type="number" min="1" max="2000" step="5" value="${this._escape(lightRadius)}" />
+      </label>
+      <div class="render-params-section">
+        <div class="render-params-header">
+          <span>Render parameters</span>
+          <label class="render-preset-label">
+            Preset:
+            <select data-light-preset="${this._escape(row.key)}">
+              <option value="">Default (${lightType})</option>
+              ${userPresets.map((p) => `<option value="${this._escape(p)}" ${currentPreset === p ? "selected" : ""}>${this._escape(p)}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <button type="button" class="render-advanced-toggle" data-toggle-render-advanced="${this._escape(row.key)}" aria-expanded="${advancedOpen ? "true" : "false"}">
+          ${advancedOpen ? "Hide advanced" : "Advanced"}
+        </button>
+        ${advancedOpen ? `
+        <div class="render-params-grid advanced">
+          ${this._renderParamSliders(row.key, lightType, rp, marker.renderParams || {})}
+        </div>
+        <div class="render-params-actions">
+          <button type="button" data-reset-render-params="${this._escape(row.key)}" title="Reset to defaults">Reset</button>
+          <button type="button" data-save-render-preset="${this._escape(row.key)}" title="Save current values as a named preset">Save as preset…</button>
+          <button type="button" data-export-render-params="${this._escape(row.key)}" title="Export parameters to file">Export</button>
+          <label class="rp-import-label" title="Import parameters from file">
+            Import
+            <input type="file" accept=".json" data-import-render-params="${this._escape(row.key)}" style="display:none" />
+          </label>
+        </div>
+        ` : ""}
+      </div>
+      ${lightType === "spot" ? this._subSpotsEditor(row, marker, userPresets) : ""}
+      ${this._supportsLightPath(lightType) ? this._lightPathEditor(row, marker, lightType) : ""}
+      ` : ""}
+      ` : ""}
+    `;
+  }
+
+  _subSpotsEditor(row, marker, userPresets = []) {
+    const subSpots = Array.isArray(marker.subSpots) ? marker.subSpots : [];
+    const parentKey = row.key;
+    const spotRows = subSpots.map((subSpot, index) => {
+      const editorKey = this._subSpotEditorKey(parentKey, index);
+      const displayPoint = this._modelToDisplayPoint(subSpot);
+      const effective = this._effectiveSubSpotMarker(marker, subSpot);
+      const rp = this._resolveRenderParams(effective);
+      const advancedOpen = this._advancedRenderParamsOpen.has(editorKey);
+      const currentPreset = subSpot.lightPreset || "";
+      const lightRadius = subSpot.lightRadius !== "" && subSpot.lightRadius !== undefined ? subSpot.lightRadius : "";
+      return `
+        <div class="sub-spot-row" data-sub-spot-row="${this._escape(editorKey)}">
+          <div class="sub-spot-title">
+            <strong>${this._escape(subSpot.name || `Spot ${index + 1}`)}</strong>
+            <div>
+              <button type="button" class="move" data-move-sub-spot="${this._escape(parentKey)}" data-sub-spot-index="${index}">Move</button>
+              <button type="button" class="remove" data-delete-sub-spot="${this._escape(parentKey)}" data-sub-spot-index="${index}">Remove</button>
+            </div>
+          </div>
+          <label class="light-radius-editor">
+            <span>Light radius</span>
+            <input data-sub-spot-light-radius="${this._escape(parentKey)}" data-sub-spot-index="${index}" type="number" min="1" max="2000" step="5" value="${this._escape(lightRadius)}" placeholder="Parent" />
+          </label>
+          <label class="render-preset-label sub-spot-preset">
+            Preset:
+            <select data-sub-spot-preset="${this._escape(parentKey)}" data-sub-spot-index="${index}">
+              <option value="">Parent/default</option>
+              ${userPresets.map((p) => `<option value="${this._escape(p)}" ${currentPreset === p ? "selected" : ""}>${this._escape(p)}</option>`).join("")}
+            </select>
+          </label>
+          <div class="coordinate-editor sub-spot-coordinates">
+            ${["x", "y", "z"].map((axis) => `
+              <label>
+                <span>${this._axisLabelHTML(axis)}</span>
+                <input data-sub-spot-coordinate="${axis}" data-sub-spot-coordinate-key="${this._escape(parentKey)}" data-sub-spot-index="${index}" type="number" step="1" value="${this._escape(this._formatCoordinateInteger(displayPoint[axis]))}" />
+              </label>
+            `).join("")}
+          </div>
+          <button type="button" class="render-advanced-toggle" data-toggle-sub-spot-advanced="${this._escape(parentKey)}" data-sub-spot-index="${index}" aria-expanded="${advancedOpen ? "true" : "false"}">
+            ${advancedOpen ? "Hide advanced" : "Advanced"}
+          </button>
+          ${advancedOpen ? `
+            <div class="render-params-grid advanced">
+              ${this._renderParamSliders(editorKey, "spot", rp, subSpot.renderParams || {})}
+            </div>
+            <div class="render-params-actions">
+              <button type="button" data-reset-sub-spot-render-params="${this._escape(parentKey)}" data-sub-spot-index="${index}" title="Reset to parent/default">Reset</button>
+              <button type="button" data-save-sub-spot-render-preset="${this._escape(parentKey)}" data-sub-spot-index="${index}" title="Save current values as a named preset">Save as preset…</button>
+            </div>
+          ` : ""}
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div class="sub-spots-section">
+        <div class="sub-spots-header">
+          <span>Sub-spots</span>
+          <button type="button" data-add-sub-spot="${this._escape(parentKey)}">Add sub-spot</button>
+        </div>
+        ${spotRows || `<div class="sub-spots-empty">No render-only sub-spots yet.</div>`}
+      </div>
+    `;
+  }
+
+  _lightPathEditor(row, marker, lightType) {
+    const parentKey = row.key;
+    const lightShape = marker.lightShape || "path";
+    const isRect = lightShape === "rect";
+    const path = Array.isArray(marker.lightPath) ? marker.lightPath : [];
+    const drawing = this._pendingLightPath?.key === parentKey && this._pendingLightPath?.mode === "add";
+    const rect = marker.lightRect || { width: 100, depth: 80, angle: 0 };
+
+    const pointRows = path.map((point, index) => {
+      const displayPoint = this._modelToDisplayPoint(point);
+      return `
+        <div class="light-path-point-row">
+          <strong>Point ${index + 1}</strong>
+          <div class="light-path-actions">
+            <button type="button" class="move" data-move-light-path-point="${this._escape(parentKey)}" data-light-path-index="${index}">Move</button>
+            <button type="button" class="remove" data-delete-light-path-point="${this._escape(parentKey)}" data-light-path-index="${index}">Remove</button>
+          </div>
+          <div class="coordinate-editor light-path-coordinates">
+            ${["x", "y", "z"].map((axis) => `
+              <label>
+                <span>${this._axisLabelHTML(axis)}</span>
+                <input data-light-path-coordinate="${axis}" data-light-path-coordinate-key="${this._escape(parentKey)}" data-light-path-index="${index}" type="number" step="1" value="${this._escape(this._formatCoordinateInteger(displayPoint[axis]))}" />
+              </label>
+            `).join("")}
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div class="light-path-section">
+        <div class="light-path-header">
+          <span>${lightType === "linear" ? "LED strip path" : "Indirect light path"}</span>
+          <div class="light-shape-toggle">
+            <button type="button" class="${!isRect ? "active" : ""}" data-light-shape="${this._escape(parentKey)}" data-shape="path">Line</button>
+            <button type="button" class="${isRect ? "active" : ""}" data-light-shape="${this._escape(parentKey)}" data-shape="rect">Rectangle</button>
+          </div>
+        </div>
+
+        ${isRect ? `
+          <div class="light-rect-editor">
+            <label class="light-rect-field">
+              <span>Width</span>
+              <input type="number" data-light-rect="width" data-light-rect-key="${this._escape(parentKey)}" min="1" max="5000" step="5" value="${this._escape(Number(rect.width) || 100)}" />
+            </label>
+            <label class="light-rect-field">
+              <span>Depth</span>
+              <input type="number" data-light-rect="depth" data-light-rect-key="${this._escape(parentKey)}" min="1" max="5000" step="5" value="${this._escape(Number(rect.depth) || 80)}" />
+            </label>
+            <label class="light-rect-field">
+              <span>Rotation°</span>
+              <input type="number" data-light-rect="angle" data-light-rect-key="${this._escape(parentKey)}" min="-180" max="180" step="1" value="${this._escape(Number(rect.angle) || 0)}" />
+            </label>
+            <small class="light-rect-hint">Center = marker position. Move marker to reposition.</small>
+          </div>
+        ` : `
+          <div class="light-path-actions-bar">
+            <button type="button" data-toggle-light-path-draw="${this._escape(parentKey)}">${drawing ? "Stop drawing" : "Draw line"}</button>
+            <button type="button" class="remove" data-clear-light-path="${this._escape(parentKey)}" ${path.length ? "" : "disabled"}>Clear</button>
+          </div>
+          ${path.length ? pointRows : `<div class="light-path-empty">Click "Draw line", then click the 3D model to add path points.</div>`}
+        `}
+      </div>
+    `;
+  }
+
+  /** Descriptions and effectiveness notes for each render parameter. */
+  _renderParamDescriptions() {
+    return {
+      intensity:          { desc: "Overall brightness multiplier for this light.",                       effective: "All types" },
+      distance:           { desc: "How far the light reaches - affects wall reach and floor pool size.", effective: "All types" },
+      decay:              { desc: "Falloff speed. Low = very soft wide wash. High = sharp tight edge.",  effective: "All types - Most visible on Spot, Cove" },
+      angle:              { desc: "Spot cone half-angle in radians. Smaller = narrower beam.",           effective: "Spot only - ignored by others" },
+      penumbra:           { desc: "Softness of the spot cone edge. 0 = hard cut, 1 = fully feathered.", effective: "Spot only - ignored by others" },
+      tilt_x:             { desc: "Tilts the light in the X floor direction. Moves wall cone sideways.", effective: "Spot, Linear, Cove" },
+      tilt_y:             { desc: "Tilts the light up/down. Affects wall cone angle and floor offset.",  effective: "Spot, Linear, Cove" },
+      width:              { desc: "Width of the rectangular light source (model units).",                effective: "Linear, Cove - ignored by Spot, Lamp" },
+      height:             { desc: "Height of the rectangular light source. Affects emission spread.",    effective: "Linear, Cove - ignored by Spot, Lamp" },
+      floor_hotspot_size: { desc: "Size of the bright core of the floor pool relative to main pool.",   effective: "Spot, Lamp - minimal effect on Cove (no hotspot)" },
+      floor_saturation:   { desc: "Color saturation of the floor pool glow. 0 = grey, 1.5 = vivid.",   effective: "All types" },
+      floor_outer_size:   { desc: "Radius of the wide ambient scatter layer around the floor pool.",    effective: "Spot, Lamp - less relevant for Cove/Linear" },
+      floor_outer_brightness: { desc: "Brightness of the outer ambient scatter layer.",                 effective: "Spot, Lamp - less relevant for Cove/Linear" },
+      gi_brightness:      { desc: "GI bounce intensity - soft secondary floor fill. 0 = disabled.",    effective: "Spot, Lamp - disabled by default on Cove/Linear" },
+      gi_radius:          { desc: "Radius multiplier of the GI bounce mesh (x pool radius).",           effective: "Spot, Lamp" },
+      gi_warmth:          { desc: "Warms the GI bounce color (simulates warm floor reflection).",       effective: "Spot, Lamp" },
+      wall_intensity_scale: { desc: "Multiplier for overall wall glow brightness.",                     effective: "All types" },
+      wall_height_limit:  { desc: "Fraction of zone height the wall mesh covers. 1.0 = full wall.",    effective: "All types" },
+      wall_lower_bias:    { desc: "Shifts glow center down the wall. 0 = near fixture, 1 = near floor.", effective: "All types - Most visible on Spot, Cove" },
+    };
+  }
+
+  /** Renders per-type param number steppers for the render params editor. */
+  _renderParamSliders(key, lightType, rp, overrides) {
+    const esc = (v) => this._escape(v);
+    const isOverridden = (param) => overrides && param in overrides;
+    const descs = this._renderParamDescriptions();
+
+    const slider = (param, label, min, max, step, value) => {
+      const info = descs[param];
+      const tooltip = info ? `${info.desc} | Best for: ${info.effective}` : param;
+      return `
+        <label class="rp-slider ${isOverridden(param) ? "rp-overridden" : ""}" data-rp-tooltip="${esc(tooltip)}">
+          <span>${esc(label)}</span>
+          <div class="rp-stepper">
+            <button type="button" data-render-param-step="-1" data-render-param-target="${esc(param)}" data-render-param-key="${esc(key)}" aria-label="Decrease ${esc(label)}">-</button>
+            <input type="number" data-render-param="${esc(param)}" data-render-param-key="${esc(key)}"
+                   min="${min}" max="${max}" step="${step}" value="${Number(value).toFixed(2)}" />
+            <button type="button" data-render-param-step="1" data-render-param-target="${esc(param)}" data-render-param-key="${esc(key)}" aria-label="Increase ${esc(label)}">+</button>
+          </div>
+        </label>
+      `;
+    };
+
+    const section = (title, body) => `
+      <div class="render-param-group">
+        <div class="render-param-group-title">${esc(title)}</div>
+        <div class="render-param-group-grid">${body}</div>
+      </div>
+    `;
+
+    const spotShape = lightType === "spot" ? `
+      ${slider("angle",    "Angle",    0.1, 1.4, 0.05, rp.angle)}
+      ${slider("penumbra", "Penumbra", 0,   1,   0.05, rp.penumbra)}
+    ` : "";
+    const rectShape = lightType === "linear" || lightType === "cove" ? `
+      ${slider("width",  "Width",  1, 500, 5, rp.width)}
+      ${slider("height", "Height", 1, 80,  1, rp.height)}
+    ` : "";
+    const orientation = lightType === "spot"
+      ? `${slider("tilt_x", "Tilt X", -60, 60, 1, rp.tilt_x ?? 0)}
+         ${slider("tilt_y", "Tilt Y", -60, 60, 1, rp.tilt_y ?? 0)}`
+      : this._supportsLightPath(lightType)
+        ? `${slider("tilt_x", "Tilt X", -60, 60, 1, rp.tilt_x ?? 0)}
+           ${slider("tilt_y", "Tilt Y", -90, 90, 1, rp.tilt_y ?? 0)}`
+        : "";
+
+    return `
+      ${section("Core", `
+        ${slider("intensity", "Intensity", 0, 5,    0.05, rp.intensity)}
+        ${slider("distance",  "Distance",  1, 2000, 5,    rp.distance)}
+        ${slider("decay",     "Decay",     0, 4,    0.05, rp.decay)}
+      `)}
+      ${spotShape || rectShape ? section("Light Shape", `
+        ${spotShape}${rectShape}${orientation}
+      `) : ""}
+      ${section("Floor Pool", `
+        ${slider("floor_hotspot_size",    "Hotspot size",   0.05, 1.2, 0.05, rp.floor_hotspot_size)}
+        ${slider("floor_saturation",      "Saturation",     0,    1.5, 0.05, rp.floor_saturation)}
+        ${slider("floor_outer_size",      "Outer size",     1.05, 5,   0.1,  rp.floor_outer_size ?? 2.2)}
+        ${slider("floor_outer_brightness","Outer glow",     0,    1.5, 0.05, rp.floor_outer_brightness ?? 0.28)}
+        ${slider("gi_brightness",         "GI bounce",      0,    1,   0.02, rp.gi_brightness ?? 0)}
+        ${slider("gi_radius",             "GI radius",      1.2,  8,   0.1,  rp.gi_radius ?? 3.2)}
+        ${slider("gi_warmth",             "GI warmth",      0,    1,   0.05, rp.gi_warmth ?? 0.35)}
+      `)}
+      ${section("Wall Glow", `
+        ${slider("wall_intensity_scale", "Intensity",   0,   3,   0.05, rp.wall_intensity_scale)}
+        ${slider("wall_height_limit",    "Height",      0.1, 1,   0.05, rp.wall_height_limit)}
+        ${slider("wall_lower_bias",      "Shift up/down", 0, 1,   0.05, rp.wall_lower_bias ?? 0)}
+      `)}
     `;
   }
 
@@ -2833,8 +3527,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           .map(
             (axis) => `
         <label>
-          <span>${axis.toUpperCase()}</span>
-          <input data-coordinate="${axis}" data-coordinate-key="${this._escape(row.key)}" type="number" step="0.01" value="${this._escape(this._formatCoordinate(displayPoint[axis]))}" />
+          <span>${this._axisLabelHTML(axis)}</span>
+          <input data-coordinate="${axis}" data-coordinate-key="${this._escape(row.key)}" type="number" step="1" value="${this._escape(this._formatCoordinateInteger(displayPoint[axis]))}" />
         </label>
         `
           )
@@ -2848,9 +3542,36 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return Number.isFinite(number) ? number.toFixed(4) : "";
   }
 
+  _formatCoordinateInteger(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? String(Math.round(number)) : "";
+  }
+
+  _coordinateSafetyLimit() {
+    const bounds = this._modelViewer?.modelBounds;
+    if (bounds?.isBox3) {
+      const maxAbs = Math.max(
+        Math.abs(bounds.min.x), Math.abs(bounds.min.y), Math.abs(bounds.min.z),
+        Math.abs(bounds.max.x), Math.abs(bounds.max.y), Math.abs(bounds.max.z)
+      );
+      const size = bounds.getSize(new this._modelViewer.THREE.Vector3());
+      return Math.max(1000, (maxAbs + Math.max(size.x, size.y, size.z, 1)) * 8);
+    }
+    return 10000;
+  }
+
+  _isSafeCoordinateValue(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && Math.abs(number) <= this._coordinateSafetyLimit();
+  }
+
+  _isSafeModelPoint(point) {
+    return ["x", "y", "z"].every((axis) => this._isSafeCoordinateValue(point?.[axis]));
+  }
+
   _coordinateMap() {
     const raw = this._config.coordinate_map || {};
-    const defaultMap = { x: "z", y: "x", z: "y" };
+    const defaultMap = { x: "x", y: "y", z: "z" };
     const used = new Set();
     const fallback = { x: "x", y: "y", z: "z" };
     return ["x", "y", "z"].reduce((map, axis) => {
@@ -2939,6 +3660,223 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return Number.isFinite(number) ? Math.max(0, Math.min(100, Math.round(number))) : 100;
   }
 
+  _normalizeLightType(value) {
+    const normalized = String(value || "").trim();
+    const aliases = {
+      SpotLight: "spot",
+      spotlight: "spot",
+      PointLight: "lamp",
+      pointlight: "lamp",
+      RectAreaLight: "linear",
+      rectarealight: "linear",
+      spot: "spot",
+      cove: "cove",
+      linear: "linear",
+      lamp: "lamp",
+    };
+    return aliases[normalized] || aliases[normalized.toLowerCase?.()] || "";
+  }
+
+  _threeLightTypeName(lightType) {
+    const type = this._normalizeLightType(lightType);
+    if (type === "spot") return "SpotLight";
+    if (type === "lamp") return "PointLight";
+    if (type === "linear" || type === "cove") return "RectAreaLight";
+    return "";
+  }
+
+  _normalizeLightRadius(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.round(number * 100) / 100 : "";
+  }
+
+  _normalOrientationDeg(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return 0;
+    return Math.max(-180, Math.min(180, number));
+  }
+
+  _orientationBlend(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(-1, Math.min(1, number)) : 0;
+  }
+
+  _orientationSpread(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0.05, Math.min(1, number)) : 1;
+  }
+
+  /** Built-in default rendering parameters for each light type. */
+  _lightRenderDefaults() {
+    return {
+      spot: {
+        intensity: 0.9,
+        distance: 150,
+        decay: 2,
+        angle: 0.95,
+        penumbra: 0.45,
+        floor_hotspot_size: 0.46,
+        floor_saturation: 0.72,
+        wall_intensity_scale: 0.82,
+        wall_height_limit: 1.0,
+        wall_lower_bias: 0.35,
+        tilt_x: 0,
+        tilt_y: 0,
+      },
+      cove: {
+        intensity: 0.9,
+        distance: 220,   // larger reach = samples overlap more, no circles
+        decay: 0.5,      // very flat falloff — no visible circular boundary
+        width: 120,
+        height: 8,
+        floor_hotspot_size: 0.4,
+        floor_saturation: 0.65,
+        wall_intensity_scale: 0.85,
+        wall_height_limit: 1.0,
+        wall_lower_bias: 0.0,
+        tilt_x: 0,
+        tilt_y: 0,
+      },
+      linear: {
+        intensity: 1.1,
+        distance: 200,   // larger reach
+        decay: 0.55,     // very flat falloff
+        width: 140,
+        height: 6,
+        floor_hotspot_size: 0.42,
+        floor_saturation: 0.8,
+        wall_intensity_scale: 0.9,
+        wall_height_limit: 1.0,
+        wall_lower_bias: 0.0,
+        tilt_x: 0,
+        tilt_y: 0,
+      },
+      lamp: {
+        intensity: 1.0,
+        distance: 90,
+        decay: 2,
+        floor_hotspot_size: 0.34,
+        floor_saturation: 0.82,
+        wall_intensity_scale: 0.7,
+        wall_height_limit: 0.75,
+        wall_lower_bias: 0.3,
+      },
+    };
+  }
+
+  _threeFriendlyRenderParams(params = {}) {
+    const number = (value, fallback) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const migrated = { ...params };
+    migrated.intensity = number(migrated.intensity, number(migrated.floor_brightness, 1));
+    migrated.distance = Math.max(1, number(migrated.distance, number(migrated.wall_reach, 3) * 45));
+    migrated.decay = Math.max(0, Math.min(4, number(migrated.decay, number(migrated.wall_falloff, 2))));
+    migrated.angle = Math.max(0.1, Math.min(1.4, number(migrated.angle, number(migrated.cone_outer_deg, 56) * Math.PI / 180)));
+    migrated.penumbra = Math.max(0, Math.min(1, number(
+      migrated.penumbra,
+      (() => {
+        const inner = number(migrated.cone_inner_deg, 30);
+        const outer = number(migrated.cone_outer_deg, 56);
+        return outer > 0 ? Math.max(0, Math.min(1, (outer - inner) / outer)) : 0.45;
+      })()
+    )));
+    migrated.width = Math.max(1, number(migrated.width, number(migrated.floor_elongation, 3.5) * 40));
+    migrated.height = Math.max(1, number(migrated.height, 8));
+    migrated.floor_hotspot_size = Math.max(0.05, Math.min(1.2, number(migrated.floor_hotspot_size, number(migrated.floor_core_size, 0.4))));
+    migrated.floor_saturation = Math.max(0, Math.min(1.5, number(migrated.floor_saturation, 0.8)));
+    migrated.wall_intensity_scale = Math.max(0, Math.min(3, number(migrated.wall_intensity_scale, number(migrated.wall_peak, 1))));
+    migrated.wall_height_limit = Math.max(0.1, Math.min(1, number(migrated.wall_height_limit, number(migrated.wall_height_fraction, 1))));
+
+    // Compatibility fields used by the current overlay renderers.
+    migrated.floor_brightness = migrated.intensity;
+    migrated.floor_core_brightness = migrated.intensity;
+    migrated.floor_core_size = migrated.floor_hotspot_size;
+    // Auto-computed compat fields — only overwrite if user hasn't explicitly set them
+    const userSet = (key) => Number.isFinite(Number(params[key]));
+    migrated.floor_outer_size       = userSet("floor_outer_size")       ? number(params.floor_outer_size, 5)       : Math.max(1.05, Math.min(6, Math.sqrt(migrated.distance / 55)));
+    migrated.floor_outer_brightness = userSet("floor_outer_brightness") ? number(params.floor_outer_brightness, 0.12) : Math.max(0.04, Math.min(1.5, migrated.intensity * 0.28));
+    migrated.floor_softness = Math.max(0.4, Math.min(2.5, migrated.decay <= 0 ? 1.8 : 2.4 / (migrated.decay + 0.6)));
+    migrated.wall_peak = migrated.wall_intensity_scale;
+    migrated.wall_falloff = migrated.decay || 1;
+    migrated.wall_reach = Math.max(0.5, Math.min(40, migrated.distance / 45));
+    migrated.wall_height_fraction = migrated.wall_height_limit;
+    migrated.wall_lower_bias = number(migrated.wall_lower_bias, 0);
+    migrated.ceiling_light_reduction = Math.max(0.05, Math.min(1, migrated.intensity * 0.35));
+    migrated.cone_outer_deg = migrated.angle * 180 / Math.PI;
+    migrated.cone_inner_deg = migrated.cone_outer_deg * (1 - migrated.penumbra);
+    migrated.floor_elongation = Math.max(1, migrated.width / 40);
+    migrated.gi_brightness = userSet("gi_brightness") ? number(params.gi_brightness, 0)    : 0;
+    migrated.gi_radius     = userSet("gi_radius")     ? number(params.gi_radius, 3.2)       : Math.max(1.2, Math.min(8, migrated.distance / 55));
+    migrated.gi_warmth     = userSet("gi_warmth")     ? number(params.gi_warmth, 0.35)      : 0.35;
+    migrated.path_angle = migrated.tilt_y ?? migrated.path_angle ?? 0;
+    migrated.path_side = migrated.tilt_x ? Math.max(-1, Math.min(1, migrated.tilt_x / 60)) : (migrated.path_side ?? 0);
+    migrated.path_spread = Math.max(0.05, Math.min(1, 1 - migrated.penumbra * 0.65));
+    return migrated;
+  }
+
+  _cleanRenderPresetParams(params = {}) {
+    const allowed = [
+      "intensity", "distance", "decay",
+      "width", "height",
+      "angle", "penumbra", "tilt_x", "tilt_y",
+      "floor_hotspot_size", "floor_saturation",
+      "floor_outer_size", "floor_outer_brightness",
+      "gi_brightness", "gi_radius", "gi_warmth",
+      "wall_intensity_scale", "wall_height_limit", "wall_lower_bias",
+    ];
+    return allowed.reduce((result, key) => {
+      if (params[key] !== undefined && params[key] !== null && params[key] !== "") result[key] = params[key];
+      return result;
+    }, {});
+  }
+
+  /**
+   * Resolves the final rendering parameters for a marker by merging:
+   *   built-in type defaults → named preset overrides → per-marker overrides.
+   */
+  _resolveRenderParams(marker) {
+    const lightType = this._normalizeLightType(marker?.lightType) || "spot";
+    const defaults = this._lightRenderDefaults()[lightType] || this._lightRenderDefaults().spot;
+    const namedPreset = marker?.lightPreset ? (this._config.light_presets?.[marker.lightPreset] || {}) : {};
+    const perMarker = marker?.renderParams || {};
+    return this._threeFriendlyRenderParams({ ...defaults, ...namedPreset, ...perMarker });
+  }
+
+  _subSpotEditorKey(key, index) {
+    return `${key}::sub-spot::${index}`;
+  }
+
+  _parseSubSpotEditorKey(editorKey) {
+    const parts = String(editorKey || "").split("::sub-spot::");
+    const index = Number(parts[1]);
+    if (!parts[0] || !Number.isInteger(index) || index < 0) return null;
+    return { key: parts[0], index };
+  }
+
+  _effectiveSubSpotMarker(marker, subSpot) {
+    return {
+      ...marker,
+      ...subSpot,
+      lightType: "spot",
+      lightRadius: subSpot?.lightRadius || marker?.lightRadius || "",
+      lightPreset: subSpot?.lightPreset || marker?.lightPreset || "",
+      renderParams: {
+        ...(marker?.renderParams || {}),
+        ...(subSpot?.renderParams || {}),
+      },
+    };
+  }
+
+  _lightPathTypes() {
+    return ["cove", "linear"];
+  }
+
+  _supportsLightPath(lightType) {
+    return this._lightPathTypes().includes(this._normalizeLightType(lightType));
+  }
+
   _defaultDomainAction(row, type) {
     const domain = row?.primaryDomain || row?.domain || row?.entityId?.split(".")[0] || "";
     const moreInfoDomains = ["sensor", "binary_sensor", "climate"];
@@ -2974,18 +3912,22 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return `
       <div class="selected-title">
         <strong>${this._escape(name)}</strong>
-        <button type="button" data-edit-marker="${this._escape(key)}">Move</button>
+        <div class="selected-title-actions">
+          <button type="button" data-edit-marker="${this._escape(key)}">Move</button>
+          <button type="button" class="remove" data-remove="${this._escape(key)}">Remove</button>
+        </div>
       </div>
-      ${row ? this._actionEditor(row) : ""}
+      ${row ? this._iconSelect(row) : ""}
       ${row ? this._markerDisplayEditor(row) : ""}
+      ${row ? this._actionEditor(row) : ""}
       ${row ? this._lightIntensityEditor(row) : ""}
       <div class="coordinate-editor selected-coordinates">
         ${["x", "y", "z"]
           .map(
             (axis) => `
         <label>
-          <span>${axis.toUpperCase()}</span>
-          <input data-coordinate="${axis}" data-coordinate-key="${this._escape(key)}" type="number" step="0.01" value="${this._escape(this._formatCoordinate(displayPoint[axis]))}" />
+          <span>${this._axisLabelHTML(axis)}</span>
+          <input data-coordinate="${axis}" data-coordinate-key="${this._escape(key)}" type="number" step="1" value="${this._escape(this._formatCoordinateInteger(displayPoint[axis]))}" />
         </label>
         `
           )
@@ -3028,6 +3970,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _startMarkerMove(key) {
     this._pendingDeviceKey = key;
+    this._pendingSubSpot = null;
+    this._pendingLightPath = null;
     const row = this._deviceRows().find((item) => item.key === this._pendingDeviceKey);
     const status = this.shadowRoot?.querySelector("[data-model-status]");
     if (status) {
@@ -3048,6 +3992,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         delete this._markers[key];
         this._selectedMarkers.delete(key);
         if (this._pendingDeviceKey === key) this._pendingDeviceKey = null;
+        if (this._pendingSubSpot?.key === key) this._pendingSubSpot = null;
+        if (this._pendingLightPath?.key === key) this._pendingLightPath = null;
         this._saveMarkers();
         this._refresh3DMarkerOverlay();
         this._refreshDeviceRow(key);
@@ -3103,6 +4049,143 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       });
     });
 
+    rowElement.querySelectorAll("[data-light-type]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.lightType;
+        if (!this._markers[key]) return;
+        this._markers[key].lightType = this._normalizeLightType(event.currentTarget.value);
+        if ((this._markers[key].lightType || "spot") !== "spot" && this._pendingSubSpot?.key === key) this._pendingSubSpot = null;
+        if (!this._supportsLightPath(this._markers[key].lightType) && this._pendingLightPath?.key === key) this._pendingLightPath = null;
+        this._saveMarkers();
+        this._refresh3DMarkerOverlay();
+        this._refresh3DZoneOverlay();
+        // Re-render panel so the radius field appears/disappears based on type selection
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
+    rowElement.querySelectorAll("[data-light-radius]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      const onRadiusChange = (event) => {
+        const key = event.currentTarget.dataset.lightRadius;
+        if (!this._markers[key]) return;
+        const val = this._normalizeLightRadius(event.currentTarget.value) || 1.5;
+        this._markers[key].lightRadius = val;
+        this._refresh3DZoneOverlay();
+      };
+      element.addEventListener("input", onRadiusChange);
+      element.addEventListener("change", (event) => {
+        onRadiusChange(event);
+        this._saveMarkers();
+      });
+    });
+
+    rowElement.querySelectorAll("[data-light-preset]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.lightPreset;
+        if (!this._markers[key]) return;
+        this._markers[key].lightPreset = event.currentTarget.value;
+        this._saveMarkers();
+        this._refresh3DZoneOverlay();
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
+    rowElement.querySelectorAll("[data-toggle-render-advanced]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.toggleRenderAdvanced;
+        if (!key) return;
+        if (this._advancedRenderParamsOpen.has(key)) this._advancedRenderParamsOpen.delete(key);
+        else this._advancedRenderParamsOpen.add(key);
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+        else this._refreshDeviceRow(key);
+      });
+    });
+
+    this._bindRenderParamControls(rowElement);
+
+    rowElement.querySelectorAll("[data-reset-render-params]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.resetRenderParams;
+        if (!this._markers[key]) return;
+        this._markers[key].renderParams = {};
+        this._markers[key].lightPreset = "";
+        this._saveMarkers();
+        this._refresh3DZoneOverlay();
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
+    rowElement.querySelectorAll("[data-save-render-preset]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.saveRenderPreset;
+        const marker = this._markers[key];
+        if (!marker) return;
+        const name = window.prompt("Preset name:");
+        if (!name?.trim()) return;
+        const safeName = name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+        if (!this._config.light_presets) this._config.light_presets = {};
+        this._config.light_presets[safeName] = this._cleanRenderPresetParams(this._resolveRenderParams(marker));
+        marker.lightPreset = safeName;
+        this._savePresets();
+        this._saveMarkers();
+        this._refresh3DZoneOverlay();
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
+    rowElement.querySelectorAll("[data-export-render-params]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.exportRenderParams;
+        const marker = this._markers[key];
+        if (!marker) return;
+        const name = (marker.name || key).replace(/[^a-z0-9_-]/gi, "_");
+        const data = {
+          lightType: this._normalizeLightType(marker.lightType) || "spot",
+          lightPreset: marker.lightPreset || "",
+          renderParams: this._resolveRenderParams(marker),
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `light-params-${name}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    });
+
+    rowElement.querySelectorAll("[data-import-render-params]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const key = event.currentTarget.dataset.importRenderParams;
+        const file = event.currentTarget.files[0];
+        if (!file || !this._markers[key]) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const data = JSON.parse(e.target.result);
+            const params = data.renderParams || data;
+            const cleaned = this._cleanRenderPresetParams(params);
+            this._markers[key].renderParams = cleaned;
+            if (data.lightPreset) this._markers[key].lightPreset = data.lightPreset;
+            this._saveMarkers();
+            this._refresh3DZoneOverlay();
+            if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+          } catch (err) {
+            console.error("home-assistant-3d-floorplan: render params import failed", err);
+          }
+        };
+        reader.readAsText(file);
+        event.currentTarget.value = "";
+      });
+    });
+
     rowElement.querySelectorAll("[data-coordinate]").forEach((element) => {
       element.addEventListener("pointerdown", (event) => event.stopPropagation());
       element.addEventListener("change", (event) => {
@@ -3110,6 +4193,234 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       });
       element.addEventListener("input", (event) => {
         this._update3DMarkerCoordinate(event.currentTarget.dataset.coordinateKey, event.currentTarget.dataset.coordinate, event.currentTarget.value, { skipHistory: true, skipSave: true, skipPanelRefresh: true });
+      });
+    });
+    this._bindSubSpotControls(rowElement);
+    this._bindLightPathControls(rowElement);
+  }
+
+  _bindSubSpotControls(rootElement) {
+    if (!rootElement) return;
+    rootElement.querySelectorAll("[data-add-sub-spot]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._addSubSpot(event.currentTarget.dataset.addSubSpot);
+      });
+    });
+
+    rootElement.querySelectorAll("[data-delete-sub-spot]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._deleteSubSpot(event.currentTarget.dataset.deleteSubSpot, Number(event.currentTarget.dataset.subSpotIndex));
+      });
+    });
+
+    rootElement.querySelectorAll("[data-move-sub-spot]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._startSubSpotMove(event.currentTarget.dataset.moveSubSpot, Number(event.currentTarget.dataset.subSpotIndex));
+      });
+    });
+
+    rootElement.querySelectorAll("[data-sub-spot-coordinate]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        this._updateSubSpotCoordinate(event.currentTarget.dataset.subSpotCoordinateKey, Number(event.currentTarget.dataset.subSpotIndex), event.currentTarget.dataset.subSpotCoordinate, event.currentTarget.value);
+      });
+      element.addEventListener("input", (event) => {
+        this._updateSubSpotCoordinate(event.currentTarget.dataset.subSpotCoordinateKey, Number(event.currentTarget.dataset.subSpotIndex), event.currentTarget.dataset.subSpotCoordinate, event.currentTarget.value, { skipHistory: true, skipSave: true, skipPanelRefresh: true });
+      });
+    });
+
+    rootElement.querySelectorAll("[data-sub-spot-light-radius]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      const onRadiusChange = (event) => {
+        this._updateSubSpotLightRadius(event.currentTarget.dataset.subSpotLightRadius, Number(event.currentTarget.dataset.subSpotIndex), event.currentTarget.value, { skipHistory: true, skipSave: true, skipPanelRefresh: true });
+      };
+      element.addEventListener("input", onRadiusChange);
+      element.addEventListener("change", (event) => {
+        this._updateSubSpotLightRadius(event.currentTarget.dataset.subSpotLightRadius, Number(event.currentTarget.dataset.subSpotIndex), event.currentTarget.value);
+      });
+    });
+
+    rootElement.querySelectorAll("[data-sub-spot-preset]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        this._updateSubSpotPreset(event.currentTarget.dataset.subSpotPreset, Number(event.currentTarget.dataset.subSpotIndex), event.currentTarget.value);
+      });
+    });
+
+    rootElement.querySelectorAll("[data-toggle-sub-spot-advanced]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.toggleSubSpotAdvanced;
+        const index = Number(event.currentTarget.dataset.subSpotIndex);
+        const editorKey = this._subSpotEditorKey(key, index);
+        if (this._advancedRenderParamsOpen.has(editorKey)) this._advancedRenderParamsOpen.delete(editorKey);
+        else this._advancedRenderParamsOpen.add(editorKey);
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
+    this._bindRenderParamControls(rootElement);
+
+    rootElement.querySelectorAll("[data-reset-sub-spot-render-params]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._resetSubSpotRenderParams(event.currentTarget.dataset.resetSubSpotRenderParams, Number(event.currentTarget.dataset.subSpotIndex));
+      });
+    });
+
+    rootElement.querySelectorAll("[data-save-sub-spot-render-preset]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._saveSubSpotRenderPreset(event.currentTarget.dataset.saveSubSpotRenderPreset, Number(event.currentTarget.dataset.subSpotIndex));
+      });
+    });
+  }
+
+  _bindRenderParamControls(rootElement) {
+    if (!rootElement) return;
+    rootElement.querySelectorAll("[data-render-param]").forEach((element) => {
+      if (element._renderParamBound) return;
+      element._renderParamBound = true;
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("input", (event) => {
+        this._applyRenderParamInput(event.currentTarget, { skipSave: true });
+      });
+      element.addEventListener("change", (event) => {
+        this._applyRenderParamInput(event.currentTarget);
+      });
+      element.addEventListener("wheel", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._stepRenderParamInput(event.currentTarget, event.deltaY < 0 ? 1 : -1);
+      }, { passive: false });
+    });
+
+    rootElement.querySelectorAll("[data-render-param-step]").forEach((element) => {
+      if (element._renderParamStepBound) return;
+      element._renderParamStepBound = true;
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const input = event.currentTarget.closest(".rp-stepper")?.querySelector("[data-render-param]");
+        this._stepRenderParamInput(input, Number(event.currentTarget.dataset.renderParamStep));
+      });
+    });
+  }
+
+  _renderParamDecimals(step) {
+    const text = String(step || "1");
+    return text.includes(".") ? text.split(".")[1].length : 0;
+  }
+
+  _stepRenderParamInput(input, direction) {
+    if (!input) return;
+    const step = Number(input.step) || 1;
+    const min = Number(input.min);
+    const max = Number(input.max);
+    const current = Number(input.value);
+    const base = Number.isFinite(current) ? current : 0;
+    let next = base + (Number(direction) || 0) * step;
+    if (Number.isFinite(min)) next = Math.max(min, next);
+    if (Number.isFinite(max)) next = Math.min(max, next);
+    input.value = next.toFixed(this._renderParamDecimals(step));
+    this._applyRenderParamInput(input);
+  }
+
+  _applyRenderParamInput(input, options = {}) {
+    if (!input) return;
+    const key = input.dataset.renderParamKey;
+    const param = input.dataset.renderParam;
+    const value = Number(input.value);
+    if (!key || !param || !Number.isFinite(value)) return;
+
+    const parsed = this._parseSubSpotEditorKey(key);
+    if (parsed) {
+      this._updateSubSpotRenderParam(parsed.key, parsed.index, param, value, {
+        skipHistory: true,
+        skipSave: options.skipSave === true,
+        skipPanelRefresh: true,
+      });
+      return;
+    }
+
+    if (!this._markers[key]) return;
+    if (!this._markers[key].renderParams) this._markers[key].renderParams = {};
+    this._markers[key].renderParams[param] = parseFloat(value);
+    if (options.skipSave === true) this._refreshYamlExport();
+    else this._saveMarkers();
+    this._refresh3DZoneOverlay();
+  }
+
+  _bindLightPathControls(rootElement) {
+    if (!rootElement) return;
+    // Shape toggle: Line ↔ Rectangle
+    rootElement.querySelectorAll("[data-light-shape]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const key = event.currentTarget.dataset.lightShape;
+        const shape = event.currentTarget.dataset.shape;
+        if (!this._markers[key]) return;
+        this._markers[key].lightShape = shape;
+        this._saveMarkers();
+        this._refresh3DZoneOverlay();
+        if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+      });
+    });
+
+    // Rectangle dimension inputs
+    rootElement.querySelectorAll("[data-light-rect]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      const onRectChange = (event) => {
+        const key = event.currentTarget.dataset.lightRectKey;
+        const field = event.currentTarget.dataset.lightRect;
+        if (!this._markers[key]) return;
+        if (!this._markers[key].lightRect) this._markers[key].lightRect = { width: 100, depth: 80, angle: 0 };
+        this._markers[key].lightRect[field] = parseFloat(event.currentTarget.value) || 0;
+        this._refresh3DZoneOverlay();
+      };
+      element.addEventListener("input", onRectChange);
+      element.addEventListener("change", (event) => { onRectChange(event); this._saveMarkers(); });
+    });
+
+    rootElement.querySelectorAll("[data-toggle-light-path-draw]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._toggleLightPathDrawing(event.currentTarget.dataset.toggleLightPathDraw);
+      });
+    });
+
+    rootElement.querySelectorAll("[data-clear-light-path]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._clearLightPath(event.currentTarget.dataset.clearLightPath);
+      });
+    });
+
+    rootElement.querySelectorAll("[data-move-light-path-point]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._startLightPathPointMove(event.currentTarget.dataset.moveLightPathPoint, Number(event.currentTarget.dataset.lightPathIndex));
+      });
+    });
+
+    rootElement.querySelectorAll("[data-delete-light-path-point]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._deleteLightPathPoint(event.currentTarget.dataset.deleteLightPathPoint, Number(event.currentTarget.dataset.lightPathIndex));
+      });
+    });
+
+    rootElement.querySelectorAll("[data-light-path-coordinate]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        this._updateLightPathCoordinate(event.currentTarget.dataset.lightPathCoordinateKey, Number(event.currentTarget.dataset.lightPathIndex), event.currentTarget.dataset.lightPathCoordinate, event.currentTarget.value);
+      });
+      element.addEventListener("input", (event) => {
+        this._updateLightPathCoordinate(event.currentTarget.dataset.lightPathCoordinateKey, Number(event.currentTarget.dataset.lightPathIndex), event.currentTarget.dataset.lightPathCoordinate, event.currentTarget.value, { skipHistory: true, skipSave: true, skipPanelRefresh: true });
       });
     });
   }
@@ -3252,6 +4563,41 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     `        tap_action: ${marker.tapAction}`,
                     `        hold_action: ${marker.holdAction}`,
                     ...(marker.lightIntensity !== "" ? [`        light_intensity: ${marker.lightIntensity}`] : []),
+                    ...(marker.lightType ? [`        light_type: ${this._threeLightTypeName(marker.lightType)}`, `        light_radius: ${marker.lightRadius || 1.5}`] : []),
+                    ...(marker.lightPreset ? [`        light_preset: ${marker.lightPreset}`] : []),
+                    ...(marker.renderParams ? Object.entries(marker.renderParams).map(([k, v]) => `        render_params.${k}: ${v}`) : []),
+                    ...(marker.subSpots?.length
+                      ? [
+                          `        sub_spots:`,
+                          ...marker.subSpots.flatMap((spot) => [
+                            `          - name: ${spot.name}`,
+                            ...(spot.lightRadius ? [`            light_radius: ${spot.lightRadius}`] : []),
+                            ...(spot.lightPreset ? [`            light_preset: ${spot.lightPreset}`] : []),
+                            ...(spot.renderParams ? Object.entries(spot.renderParams).map(([k, v]) => `            render_params.${k}: ${v}`) : []),
+                            `            x: ${spot.x}`,
+                            `            y: ${spot.y}`,
+                            ...(spot.z !== "" ? [`            z: ${spot.z}`] : []),
+                          ]),
+                        ]
+                      : []),
+                    ...(marker.lightShape === "rect" && marker.lightRect
+                      ? [
+                          `        light_shape: rect`,
+                          `        light_rect:`,
+                          `          width: ${marker.lightRect.width ?? 100}`,
+                          `          depth: ${marker.lightRect.depth ?? 80}`,
+                          `          angle: ${marker.lightRect.angle ?? 0}`,
+                        ]
+                      : marker.lightPath?.length
+                        ? [
+                            `        light_path:`,
+                            ...marker.lightPath.flatMap((point) => [
+                              `          - x: ${point.x}`,
+                              `            y: ${point.y}`,
+                              ...(point.z !== "" ? [`            z: ${point.z}`] : []),
+                            ]),
+                          ]
+                        : []),
                     `        x: ${marker.x}`,
                     `        y: ${marker.y}`,
                     ...(marker.z !== "" ? [`        z: ${marker.z}`] : []),
@@ -3268,6 +4614,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     `        height: ${zone.height}`,
                     `        day_opacity: ${zone.dayOpacity}`,
                     `        night_opacity: ${zone.nightOpacity}`,
+                    ...(zone.lightingMode === "positional" ? [`        lighting_mode: positional`] : []),
                     ...(zone.illuminanceEnabled ? [`        illuminance_enabled: true`, ...(zone.illuminanceEntity ? [`        illuminance_entity: ${zone.illuminanceEntity}`] : [])] : []),
                     ...(zone.showLux ? [`        show_lux: true`] : []),
                     "        points:",
@@ -3303,6 +4650,33 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               `    tap_action: ${marker.tapAction}`,
               `    hold_action: ${marker.holdAction}`,
               ...(marker.lightIntensity !== "" ? [`    light_intensity: ${marker.lightIntensity}`] : []),
+              ...(marker.lightType ? [`    light_type: ${this._threeLightTypeName(marker.lightType)}`, `    light_radius: ${marker.lightRadius || 1.5}`] : []),
+              ...(marker.lightPreset ? [`    light_preset: ${marker.lightPreset}`] : []),
+              ...(marker.renderParams ? Object.entries(marker.renderParams).map(([k, v]) => `    render_params.${k}: ${v}`) : []),
+              ...(marker.subSpots?.length
+                ? [
+                    `    sub_spots:`,
+                    ...marker.subSpots.flatMap((spot) => [
+                      `      - name: ${spot.name}`,
+                      ...(spot.lightRadius ? [`        light_radius: ${spot.lightRadius}`] : []),
+                      ...(spot.lightPreset ? [`        light_preset: ${spot.lightPreset}`] : []),
+                      ...(spot.renderParams ? Object.entries(spot.renderParams).map(([k, v]) => `        render_params.${k}: ${v}`) : []),
+                      `        x: ${spot.x}`,
+                      `        y: ${spot.y}`,
+                      ...(spot.z !== "" ? [`        z: ${spot.z}`] : []),
+                    ]),
+                  ]
+                : []),
+              ...(marker.lightPath?.length
+                ? [
+                    `    light_path:`,
+                    ...marker.lightPath.flatMap((point) => [
+                      `      - x: ${point.x}`,
+                      `        y: ${point.y}`,
+                      ...(point.z !== "" ? [`        z: ${point.z}`] : []),
+                    ]),
+                  ]
+                : []),
               `    x: ${marker.x}`,
               `    y: ${marker.y}`,
               ...(marker.z !== "" ? [`    z: ${marker.z}`] : []),
@@ -3310,6 +4684,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           ]
         : ["markers: []"]),
       ...ambientLines,
+      ...this._yamlLightPresets(),
       ...(zones.length
         ? [
             "brightness_zones:",
@@ -3320,6 +4695,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               `    height: ${zone.height}`,
               `    day_opacity: ${zone.dayOpacity}`,
               `    night_opacity: ${zone.nightOpacity}`,
+              ...(zone.lightingMode === "positional" ? [`    lighting_mode: positional`] : []),
               ...(zone.illuminanceEnabled ? [`    illuminance_enabled: true`, ...(zone.illuminanceEntity ? [`    illuminance_entity: ${zone.illuminanceEntity}`] : [])] : []),
               ...(zone.showLux ? [`    show_lux: true`] : []),
               "    points:",
@@ -3361,12 +4737,49 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           tapAction: this._exportMarkerAction(row, marker, "tap"),
           holdAction: this._exportMarkerAction(row, marker, "hold"),
           lightIntensity: row?.primaryDomain === "light" || hasCustomLightIntensity ? this._normalizeLightIntensity(marker.lightIntensity) : "",
-          x: Number(displayPoint.x).toFixed(4),
-          y: Number(displayPoint.y).toFixed(4),
-          z: Number.isFinite(Number(displayPoint.z)) ? Number(displayPoint.z).toFixed(4) : "",
+          lightType: this._normalizeLightType(marker.lightType),
+          lightRadius: this._normalizeLightRadius(marker.lightRadius),
+          lightPreset: marker.lightPreset || "",
+          renderParams: marker.renderParams && Object.keys(marker.renderParams).length ? marker.renderParams : null,
+          subSpots: (marker.subSpots || []).map((spot, index) => {
+            const spotPoint = this._modelToDisplayPoint(spot);
+            return {
+              name: spot.name || `Spot ${index + 1}`,
+              lightRadius: this._normalizeLightRadius(spot.lightRadius),
+              lightPreset: spot.lightPreset || "",
+              renderParams: spot.renderParams && Object.keys(spot.renderParams).length ? spot.renderParams : null,
+              x: this._formatCoordinateInteger(spotPoint.x),
+              y: this._formatCoordinateInteger(spotPoint.y),
+              z: this._formatCoordinateInteger(spotPoint.z),
+            };
+          }),
+          lightPath: (marker.lightPath || []).map((point) => {
+            const pathPoint = this._modelToDisplayPoint(point);
+            return {
+              x: this._formatCoordinateInteger(pathPoint.x),
+              y: this._formatCoordinateInteger(pathPoint.y),
+              z: this._formatCoordinateInteger(pathPoint.z),
+            };
+          }),
+          x: this._formatCoordinateInteger(displayPoint.x),
+          y: this._formatCoordinateInteger(displayPoint.y),
+          z: this._formatCoordinateInteger(displayPoint.z),
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  _yamlLightPresets() {
+    const presets = this._config.light_presets || {};
+    const entries = Object.entries(presets);
+    if (!entries.length) return [];
+    return [
+      "light_presets:",
+      ...entries.flatMap(([name, params]) => [
+        `  ${name}:`,
+        ...Object.entries(params).map(([k, v]) => `    ${k}: ${v}`),
+      ]),
+    ];
   }
 
   _yamlAmbientDarkness() {
@@ -3393,11 +4806,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         illuminanceEnabled: zone.illuminanceEnabled === true,
         illuminanceEntity: zone.illuminanceEntity || "",
         showLux: zone.showLux === true,
+        lightingMode: zone.lightingMode || "area",
         points: (zone.points || []).map((point) => {
           const displayPoint = this._modelToDisplayPoint(point);
           return {
-            x: Number(displayPoint.x).toFixed(4),
-            y: Number(displayPoint.y).toFixed(4),
+            x: this._formatCoordinateInteger(displayPoint.x),
+            y: this._formatCoordinateInteger(displayPoint.y),
           };
         }),
       }))
@@ -3494,6 +4908,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       renderer.domElement.style.userSelect = "none";
       renderer.domElement.style.webkitUserSelect = "none";
       renderer.domElement.style.webkitTouchCallout = "none";
+      renderer.domElement.tabIndex = 0;
+      container.addEventListener("pointerenter", () => {
+        this._modelKeyboardNavigationActive = true;
+      });
+      container.addEventListener("pointerleave", () => {
+        this._modelKeyboardNavigationActive = false;
+      });
       renderer.domElement.addEventListener("webglcontextlost", (event) => {
         event.preventDefault();
         if (status) {
@@ -3507,6 +4928,15 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         this._renderModelViewer(modelUrl);
       });
       container.appendChild(renderer.domElement);
+
+      // ── Axes gizmo — pure 2D canvas, projects world axes onto camera plane ──
+      // No second WebGL context needed; avoids any bleed into the main scene.
+      const gizmoCanvas = container.querySelector("[data-axes-gizmo]");
+      const gizmoCtx = gizmoCanvas ? gizmoCanvas.getContext("2d") : null;
+      if (gizmoCanvas) {
+        gizmoCanvas.width  = 130 * pixelRatio;
+        gizmoCanvas.height = 130 * pixelRatio;
+      }
 
       const ambient = new THREE.HemisphereLight(0xffffff, 0x334155, 1.25);
       scene.add(ambient);
@@ -3528,6 +4958,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         controls.touches.ONE = THREE.TOUCH.ROTATE;
         controls.touches.TWO = THREE.TOUCH.DOLLY_PAN;
       }
+
+      // Set camera up-vector to match the model's vertical axis so Top view and
+      // orbit feel correct regardless of whether the model is Y-up or Z-up.
+      const _vModelAxis = this._coordinateMap()[this._verticalAxis()];
+      camera.up.set(_vModelAxis === "x" ? 1 : 0, _vModelAxis === "y" ? 1 : 0, _vModelAxis === "z" ? 1 : 0);
+      controls.update();
 
       const model = await this._loadModelObject(modelUrl, { THREE, GLTFLoader, OBJLoader });
       if (renderToken !== this._modelRenderToken || !this.shadowRoot?.contains(container)) {
@@ -3555,6 +4991,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       }
       this._restoreModelCameraState(camera, controls);
       status.hidden = this._mode !== "edit";
+      if (this._mode === "edit") status.textContent = "Select an entity, then click the 3D model to place it.";
 
       const markerLayer = container.querySelector("[data-model-marker-layer]");
       const markerButtons = this._build3DMarkerButtons(markerLayer, THREE, camera);
@@ -3565,13 +5002,16 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       model.traverse((object) => {
         if (object.isMesh) pickableObjects.push(object);
       });
+      const modelBounds = new THREE.Box3().setFromObject(model);
 
       renderer.domElement.addEventListener("pointerdown", (event) => {
+        this._modelKeyboardNavigationActive = true;
+        renderer.domElement.focus?.({ preventScroll: true });
         pointerStart = { x: event.clientX, y: event.clientY };
       });
 
       renderer.domElement.addEventListener("pointerup", (event) => {
-        if (this._mode !== "edit" || (!this._pendingDeviceKey && !(this._zoneDrawing && this._activeZoneId))) return;
+        if (this._mode !== "edit" || (!this._pendingLightPath && !this._pendingSubSpot && !this._pendingDeviceKey && !(this._zoneDrawing && this._activeZoneId))) return;
         if (pointerStart && Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5) return;
         const rect = renderer.domElement.getBoundingClientRect();
         pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -3579,6 +5019,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         raycaster.setFromCamera(pointer, camera);
         const hit = raycaster.intersectObjects(pickableObjects, true)[0];
         if (!hit) return;
+        if (this._pendingLightPath) {
+          this._placeLightPathPoint(this._pendingLightPath.key, this._pendingLightPath.index, hit.point, camera);
+          return;
+        }
+        if (this._pendingSubSpot) {
+          this._placeSubSpot(this._pendingSubSpot.key, this._pendingSubSpot.index, hit.point, camera);
+          return;
+        }
         if (this._pendingDeviceKey) {
           this._place3DMarker(this._pendingDeviceKey, hit.point, camera);
           return;
@@ -3635,6 +5083,53 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         this._update3DZoneLabels(this._modelViewer?.zoneLabels || [], THREE, camera, container);
         this._update3DZonePointButtons(this._modelViewer?.zonePointButtons, THREE, camera, container);
         renderer.render(scene, camera);
+        // Draw axes gizmo on 2D canvas — project world-space axes onto camera plane
+        if (gizmoCtx && gizmoCanvas) {
+          const s = gizmoCanvas.width; // internal pixel size (68 * dpr)
+          const cx = s / 2, cy = s / 2;
+          const len = s * 0.36;
+          const pr = pixelRatio;
+          // Camera right and up vectors (world space) — project each axis onto them
+          const camRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+          const camUp    = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+          const gizmoAxes = [
+            { dir: new THREE.Vector3(1, 0, 0), color: "#ff4444", label: "X" },
+            { dir: new THREE.Vector3(0, 1, 0), color: "#44ee44", label: "Y" },
+            { dir: new THREE.Vector3(0, 0, 1), color: "#3388ff", label: "Z" },
+          ];
+          gizmoCtx.clearRect(0, 0, s, s);
+          // Draw back-facing axes first (dimmed), then front-facing on top
+          const projected = gizmoAxes.map(({ dir, color, label }) => {
+            const px = dir.dot(camRight) * len;
+            const py = -dir.dot(camUp) * len; // flip Y for screen coords
+            const depth = dir.dot(new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 2));
+            return { px, py, color, label, depth };
+          });
+          // back-facing (depth > 0 means pointing away from viewer in this projection)
+          for (const a of projected.filter(a => a.depth > 0)) {
+            gizmoCtx.globalAlpha = 0.25;
+            gizmoCtx.strokeStyle = a.color;
+            gizmoCtx.lineWidth = 1.5 * pr;
+            gizmoCtx.beginPath(); gizmoCtx.moveTo(cx, cy); gizmoCtx.lineTo(cx + a.px, cy + a.py); gizmoCtx.stroke();
+          }
+          // front-facing
+          for (const a of projected.filter(a => a.depth <= 0)) {
+            gizmoCtx.globalAlpha = 1;
+            gizmoCtx.strokeStyle = a.color;
+            gizmoCtx.lineWidth = 2 * pr;
+            gizmoCtx.beginPath(); gizmoCtx.moveTo(cx, cy); gizmoCtx.lineTo(cx + a.px, cy + a.py); gizmoCtx.stroke();
+            // dot at tip
+            gizmoCtx.fillStyle = a.color;
+            gizmoCtx.beginPath(); gizmoCtx.arc(cx + a.px, cy + a.py, 3 * pr, 0, Math.PI * 2); gizmoCtx.fill();
+            // label
+            gizmoCtx.font = `bold ${Math.round(10 * pr)}px sans-serif`;
+            gizmoCtx.textAlign = "center";
+            gizmoCtx.textBaseline = "middle";
+            gizmoCtx.fillStyle = a.color;
+            gizmoCtx.fillText(a.label, cx + a.px * 1.28, cy + a.py * 1.28);
+          }
+          gizmoCtx.globalAlpha = 1;
+        }
       };
 
       this._modelViewer = {
@@ -3647,6 +5142,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         resizeObserver,
         markerButtons,
         zoneGroup,
+        modelBounds,
+        pickableObjects,
+        surfaceRaycaster: new THREE.Raycaster(),
         offlineFocusDistance,
         animationFrame: 0,
         requestRender,
@@ -3738,7 +5236,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _build3DMarkerButtons(markerLayer, THREE, camera) {
     if (!markerLayer) return [];
     markerLayer.innerHTML = "";
-    return this._modelMarkerRows().map(({ row, marker }) => {
+    return this._modelMarkerRows().flatMap(({ row, marker }) => {
       const button = document.createElement("button");
       button.type = "button";
       const stateClass = this._stateClass(row);
@@ -3754,10 +5252,53 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       `;
       this._attachMarkerPressActions(button, row);
       markerLayer.appendChild(button);
-      return {
+      const buttons = [{
         button,
         position: new THREE.Vector3(marker.x, marker.y, marker.z),
-      };
+      }];
+      if (this._mode === "edit" && row.primaryDomain === "light" && (this._normalizeLightType(marker.lightType) || "spot") === "spot") {
+        (marker.subSpots || []).forEach((subSpot, index) => {
+          const x = Number(subSpot.x);
+          const y = Number(subSpot.y);
+          const z = Number(subSpot.z);
+          if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
+          const subButton = document.createElement("button");
+          subButton.type = "button";
+          subButton.className = "model-marker model-sub-spot icon-only";
+          subButton.dataset.marker = row.key;
+          subButton.dataset.subSpotIndex = String(index);
+          subButton.title = `${row.name} sub-spot ${index + 1}`;
+          subButton.style.setProperty("--marker-size", `${Math.max(12, this._display.markerSize * 0.72)}px`);
+          subButton.innerHTML = `<span><ha-icon icon="mdi:circle-small"></ha-icon></span>`;
+          this._attachEditPointButton(subButton, row, "sub-spot", index);
+          markerLayer.appendChild(subButton);
+          buttons.push({
+            button: subButton,
+            position: new THREE.Vector3(x, y, z),
+          });
+        });
+      }
+      if (this._mode === "edit" && row.primaryDomain === "light" && this._supportsLightPath(marker.lightType)) {
+        (marker.lightPath || []).forEach((pathPoint, index) => {
+          const x = Number(pathPoint.x);
+          const y = Number(pathPoint.y);
+          const z = Number(pathPoint.z);
+          if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
+          const pathButton = document.createElement("button");
+          pathButton.type = "button";
+          pathButton.className = "model-marker model-light-path-point icon-only";
+          pathButton.title = `${row.name} path point ${index + 1}`;
+          pathButton.style.setProperty("--marker-size", `${Math.max(10, this._display.markerSize * 0.62)}px`);
+          pathButton.innerHTML = `<span>${index + 1}</span>`;
+          this._attachEditPointButton(pathButton, row, "light-path", index);
+          markerLayer.appendChild(pathButton);
+          buttons.push({
+            button: pathButton,
+            position: new THREE.Vector3(x, y, z),
+          });
+        });
+      }
+      return buttons;
     });
   }
 
@@ -3829,6 +5370,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       this._selectedMarkers.clear();
       this._selectedMarkers.add(row.key);
       this._pendingDeviceKey = null;
+      this._pendingSubSpot = null;
+      this._pendingLightPath = null;
       this._highlightSelectedDeviceRow(row.key);
       this._refreshSelectedMarkerPanel();
       return;
@@ -3874,38 +5417,87 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const { THREE, zoneGroup } = viewer;
     while (zoneGroup.children.length) {
       const child = zoneGroup.children.pop();
-      child.geometry?.dispose?.();
-      const materials = Array.isArray(child.material) ? child.material : [child.material];
-      materials.filter(Boolean).forEach((material) => {
-        material.map?.dispose?.();
-        material.dispose?.();
+      child.traverse?.((object) => {
+        object.geometry?.dispose?.();
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        materials.filter(Boolean).forEach((material) => {
+          material.map?.dispose?.();
+          material.dispose?.();
+        });
       });
     }
 
     const rowByKey = new Map(this._deviceRows().map((row) => [row.key, row]));
+    if (this._mode === "edit") {
+      Object.entries(this._markers || {}).forEach(([key, marker]) => {
+        const row = rowByKey.get(key);
+        const lightType = this._normalizeLightType(marker?.lightType);
+        if (row?.primaryDomain !== "light" || !this._supportsLightPath(lightType)) return;
+        // For rect shape, generate the closed-loop points and draw those as the line
+        const rectPts = marker.lightShape === "rect" ? this._lightRectPoints(marker) : null;
+        const lineMarker = rectPts
+          ? { ...marker, lightPath: [...rectPts, { ...rectPts[0] }] }  // close loop visually only
+          : marker;
+        const line = this._createLightPathLine(THREE, lineMarker, lightType);
+        if (line) zoneGroup.add(line);
+      });
+    }
     for (const zone of Object.values(this._zones || {})) {
       if ((zone.points || []).length < 3) continue;
       const lighting = this._zoneLighting(zone, rowByKey);
       const brightness = lighting.brightness;
       const darkness = this._zoneDarkness(brightness, zone);
-      const floorOpacity = this._mode === "edit" ? Math.max(0.1, brightness * 0.45) : brightness * 0.38;
-      const floorShadeOpacity = darkness * 0.32;
-      const wallShade = this._zoneWallShadeMeshes(THREE, zone, darkness);
-      wallShade.forEach((wall) => zoneGroup.add(wall));
-      if (floorShadeOpacity > 0.01) {
-        const floorShade = this._zoneMesh(THREE, zone, floorShadeOpacity, "#020617", { renderOrder: 1.9, floorLift: 0.045 });
+
+      if (zone.lightingMode === "positional") {
+        // --- Individual Light Glow: walls always at full ambient darkness, only per-light glow lifts nearby walls ---
+        const ambientDarkness = this._zoneAmbientDarknessOpacity(zone); // ignores light state — always max dark base
+        // Keep the floor shade subtle so tile/material texture stays visible.
+        // All walls stay fully dark regardless of which lights are on
+        const wallShade = this._zoneWallShadeMeshes(THREE, zone, ambientDarkness);
+        wallShade.forEach((wall) => zoneGroup.add(wall));
+        const floorShade = this._zoneFloorShadeMesh(THREE, zone, ambientDarkness, "positional");
         if (floorShade) zoneGroup.add(floorShade);
+        const lights = this._positionalLights(zone, rowByKey);
+        const ceilingShade = this._zoneCeilingShadeMesh(THREE, zone, ambientDarkness);
+        if (ceilingShade) zoneGroup.add(ceilingShade);
+        // For cove/linear: floor fill is zone-wide — only render it once per unique entity key
+        const lineTypeFloorDone = new Set();
+        for (const light of lights) {
+          const isLineType = light.lightType === "cove" || light.lightType === "linear";
+          const entityKey = light.marker?.key || light.row?.key;
+          const skipFloor = isLineType && lineTypeFloorDone.has(entityKey);
+          if (!skipFloor) {
+            const floorGlow = this._createFloorLightGlowMesh(THREE, zone, light.marker, light.lightType, light.lightRadius, light.color, light.brightness);
+            if (floorGlow) zoneGroup.add(floorGlow);
+            const giBounce = this._createGIBounceMesh(THREE, zone, light.marker, light.lightType, light.lightRadius, light.color, light.brightness);
+            if (giBounce) zoneGroup.add(giBounce);
+            if (isLineType && entityKey) lineTypeFloorDone.add(entityKey);
+          }
+          // Only the walls physically close to this light get illuminated
+          const nearWalls = this._nearbyWallGlowMeshes(THREE, zone, light.marker, light.lightRadius, light.color, light.brightness, light.lightType, light.heightFraction);
+          nearWalls.forEach((w) => zoneGroup.add(w));
+          const ceilingGlow = this._createCeilingLightGlowMesh(THREE, zone, light.marker, light.lightType, light.lightRadius, light.color, light.brightness);
+          if (ceilingGlow) zoneGroup.add(ceilingGlow);
+        }
+        const outline = this._zoneOutline(THREE, zone);
+        if (outline) zoneGroup.add(outline);
+      } else {
+        // --- Area mode: single large soft pool centered on zone + wall wash ---
+        const wallShade = this._zoneWallShadeMeshes(THREE, zone, darkness);
+        wallShade.forEach((wall) => zoneGroup.add(wall));
+        const floorShade = this._zoneFloorShadeMesh(THREE, zone, darkness, "area");
+        if (floorShade) zoneGroup.add(floorShade);
+        const ceilingDarkness = this._zoneCeilingDarkness(darkness, lighting.lights || []);
+        const ceilingShade = this._zoneCeilingShadeMesh(THREE, zone, ceilingDarkness);
+        if (ceilingShade) zoneGroup.add(ceilingShade);
+        // Polygon-clipped flat floor glow — stays exactly within zone boundary, no bleed
+        const areaGlow = this._zoneAreaGlowMesh(THREE, zone, brightness, lighting.color);
+        if (areaGlow) zoneGroup.add(areaGlow);
+        const wallWash = brightness > 0.01 ? this._zoneWallWashMeshes(THREE, zone, brightness * 0.75, lighting.color) : [];
+        wallWash.forEach((wall) => zoneGroup.add(wall));
+        const outline = this._zoneOutline(THREE, zone);
+        if (outline) zoneGroup.add(outline);
       }
-      const midShade = this._zoneMidShadeMesh(THREE, zone, darkness);
-      if (midShade) zoneGroup.add(midShade);
-      if (floorOpacity > 0.01) {
-        const mesh = this._zoneMesh(THREE, zone, floorOpacity, lighting.color, { floorLift: 0.045 });
-        if (mesh) zoneGroup.add(mesh);
-      }
-      const wallWash = brightness > 0.01 ? this._zoneWallWashMeshes(THREE, zone, brightness, lighting.color) : [];
-      wallWash.forEach((wall) => zoneGroup.add(wall));
-      const outline = this._zoneOutline(THREE, zone);
-      if (outline) zoneGroup.add(outline);
     }
     this._refresh3DZoneLabels();
     this._refresh3DZonePointOverlay();
@@ -3913,7 +5505,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   }
 
   _zoneMesh(THREE, zone, opacity, color = zone.color || "#f8d66d", options = {}) {
-    const points = this._offsetZonePoints(zone.points, options.floorLift);
+    const points = this._floorSurfacePoints(THREE, zone, options.floorLift);
     const vertices = points.flatMap((point) => [point.x, point.y, point.z]);
     const displayPoints = (zone.points || []).map((point) => this._modelToDisplayPoint(point));
     const axes = this._floorAxes();
@@ -3930,10 +5522,60 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       opacity,
       side: THREE.DoubleSide,
       depthWrite: false,
+      ...(options.additive ? { blending: THREE.AdditiveBlending } : {}),
     });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.renderOrder = options.renderOrder || 2;
     return mesh;
+  }
+
+  _zoneFloorShadeMesh(THREE, zone, darkness, mode = "area") {
+    const strength = Math.max(0, Math.min(1, Number(darkness) || 0));
+    const opacity = mode === "positional"
+      ? Math.min(0.48, strength * 0.46)
+      : Math.min(0.42, strength * 0.38);
+    if (opacity <= 0.01) return null;
+    return this._zoneMesh(THREE, zone, opacity, "#273244", {
+      renderOrder: 1.9,
+      floorLift: mode === "positional" ? 0.045 : 0.12,
+      surfaceSnap: true,
+    });
+  }
+
+  _attachEditPointButton(button, row, pointType, index) {
+    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this._selectedMarkers.clear();
+      this._selectedMarkers.add(row.key);
+      this._pendingDeviceKey = null;
+      this._pendingSubSpot = null;
+      this._pendingLightPath = null;
+      this._highlightSelectedDeviceRow(row.key);
+      this._refreshSelectedMarkerPanel();
+    });
+    button.dataset.marker = row.key;
+    button.dataset.pointType = pointType;
+    button.dataset.pointIndex = String(index);
+  }
+
+  _createLightPathLine(THREE, marker, lightType) {
+    const points = (marker.lightPath || [])
+      .map((point) => new THREE.Vector3(Number(point.x), Number(point.y), Number(point.z)))
+      .filter((point) => this._isSafeModelPoint(point));
+    if (points.length < 2) return null;
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    const material = new THREE.LineBasicMaterial({
+      color: lightType === "linear" ? 0xfacc15 : 0x93c5fd,
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+      depthTest: false,
+    });
+    const line = new THREE.Line(geometry, material);
+    line.renderOrder = 20;
+    return line;
   }
 
   _zoneOutline(THREE, zone) {
@@ -3952,7 +5594,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const basePoints = this._offsetZonePoints(zone.points);
     if (basePoints.length < 2) return [];
     const displayHeight = Math.max(0.01, Math.abs(this._zoneHeight(zone)));
-    const modelHeight = this._displayToModelVector({ x: 0, y: 0, z: displayHeight });
+    const modelHeight = this._displayToModelVector(this._displayHeightVector(displayHeight));
     const heightVector = new THREE.Vector3(modelHeight.x, modelHeight.y, modelHeight.z);
     if (!heightVector.length()) return [];
     const colorValue = color || zone.color || "#f8d66d";
@@ -3990,13 +5632,231 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     });
   }
 
+  /** Per-fragment lit wall glow — GPU computes 1/r² distance falloff at every pixel so long walls
+   *  are bright near the light and naturally dark at the far end, no manual grid subdivision needed. */
+  _nearbyWallGlowMeshes(THREE, zone, marker, lightRadius, color, brightness, lightType, heightFraction = 0.8) {
+    if (brightness < 0.01) return [];
+    const basePoints = this._offsetZonePoints(zone.points);
+    if (basePoints.length < 2) return [];
+    const displayHeight = Math.max(0.01, Math.abs(this._zoneHeight(zone)));
+    const modelHeight = this._displayToModelVector(this._displayHeightVector(displayHeight));
+    const heightVector = new THREE.Vector3(modelHeight.x, modelHeight.y, modelHeight.z);
+    if (!heightVector.length()) return [];
+
+    const floorAxes = this._floorAxes();
+    const map = this._coordinateMap();
+    const ax0 = map[floorAxes[0]];
+    const ax1 = map[floorAxes[1]];
+    const verticalModelAxis = map[this._verticalAxis()]; // "x" | "y" | "z"
+
+    // Light world position — markers store model-space coords directly (set by raycaster hit).
+    const lightPos = new THREE.Vector3(Number(marker.x), Number(marker.y), Number(marker.z));
+    // Floor-projected light position — same XY but at floor level.
+    // Used as the "bounce emitter" for spot wall glow so lower wall is brighter
+    // (closer to the bright floor hotspot) and upper wall is dimmer.
+    const floorLevel = this._zoneFloorLevel(zone);
+    const floorLightPos = lightPos.clone();
+    floorLightPos[verticalModelAxis] = floorLevel;
+
+    // Resolve per-marker render params (built-in defaults → named preset → per-marker overrides)
+    const rp = this._resolveRenderParams(marker);
+
+    // Max reach of this light on the walls
+    const baseReach = Math.max(1, Number(rp.distance) || lightRadius * rp.wall_reach);
+    const spotReach = heightFraction > 0
+      ? Math.max(baseReach, (lightPos[verticalModelAxis] - floorLevel) * 1.8)
+      : baseReach;
+    const maxReach = lightType === "spot" ? spotReach : baseReach;
+
+    // Wall mesh covers full zone height
+    const wallHeightFraction = Math.max(0.1, Math.min(1, Number(rp.wall_height_fraction) || 1));
+
+    // Peak brightness using resolved param
+    const peakBrightness = brightness * rp.wall_peak * (lightType === "spot" ? Math.max(0.5, heightFraction) : 1.0);
+
+    const { r: cr, g: cg, b: cb } = this._cssColorToRgba(color || zone.color || "#f8d66d");
+    const uColor = new THREE.Color(cr / 255, cg / 255, cb / 255);
+
+    const falloffExp = rp.wall_falloff;
+
+    // Spot cone direction: default points straight down, optional tilt steers it.
+    const spotDir = this._spotDirectionVector(THREE, rp, verticalModelAxis, ax0, ax1);
+
+    const baseSpotDir = new THREE.Vector3(
+      verticalModelAxis === "x" ? -1 : 0,
+      verticalModelAxis === "y" ? -1 : 0,
+      verticalModelAxis === "z" ? -1 : 0,
+    );
+
+    const vertexShader = `
+      varying vec3 vWorldPos;
+      void main() {
+        vec4 worldPos = modelMatrix * vec4(position, 1.0);
+        vWorldPos = worldPos.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+      }
+    `;
+    const isSpot = lightType === "spot";
+    const fragmentShader = `
+      uniform vec3  uLightPos;
+      uniform vec3  uColor;
+      uniform float uPeak;
+      uniform float uRadius;
+      uniform float uFalloffExp;
+      uniform float uIsSpot;
+      uniform vec3  uSpotDir;    // normalised downward direction for cone
+      uniform float uConeInner;  // cos of inner half-angle (bright core)
+      uniform float uConeOuter;  // cos of outer half-angle (penumbra edge)
+      varying vec3  vWorldPos;
+      void main() {
+        vec3 toPoint = vWorldPos - uLightPos;
+        float dist = length(toPoint);
+        if (dist >= uRadius) { gl_FragColor = vec4(0.0); return; }
+
+        float intensity;
+        if (uIsSpot > 0.5) {
+          // True cone: check angle between ray and downward spot axis
+          vec3 dir = normalize(toPoint);
+          float cosA = dot(dir, uSpotDir);
+
+          // Outside outer cone edge — no contribution
+          if (cosA < uConeOuter) { gl_FragColor = vec4(0.0); return; }
+
+          // Smooth penumbra from outer to inner cone edge
+          float coneFactor = smoothstep(uConeOuter, uConeInner, cosA);
+
+          // Distance falloff from the light source
+          float distFalloff = pow(max(0.0, 1.0 - dist / uRadius), uFalloffExp);
+
+          intensity = coneFactor * distFalloff * uPeak;
+        } else {
+          // Cove / linear / lamp: smooth continuous wash — no hard circular boundary.
+          // Uses a squared distance-ratio so the falloff is very gradual, preventing
+          // visible circle edges between adjacent path samples.
+          float t = max(0.0, 1.0 - (dist * dist) / (uRadius * uRadius));
+          float baseFalloff = pow(t, uFalloffExp * 0.5); // half exponent = much flatter
+
+          // Vertical gradient: brighter near ceiling (light source), fades downward
+          float verticalDrop = dot(toPoint, uSpotDir); // positive = below light
+          float normDrop = clamp(verticalDrop / uRadius, 0.0, 1.0);
+          float verticalFactor = pow(max(0.0, 1.0 - normDrop * 0.55), 0.4);
+
+          intensity = baseFalloff * verticalFactor * uPeak;
+        }
+        ${this._supportsLightPath(lightType) ? `
+        vec3 orientationDir = vec3(${Number(marker.orientationDir?.x || 0).toFixed(6)}, ${Number(marker.orientationDir?.y || 0).toFixed(6)}, ${Number(marker.orientationDir?.z || 0).toFixed(6)});
+        float orientationLen = length(orientationDir);
+        if (orientationLen > 0.001) {
+          vec3 aimed = toPoint / max(length(toPoint), 0.0001);
+          vec3 oriented = orientationDir / orientationLen;
+          float sideFactor = smoothstep(${(1 - this._orientationSpread(marker.orientationSpread) * 1.35).toFixed(3)}, 1.0, dot(aimed, oriented));
+          intensity *= sideFactor;
+        }
+        ` : ""}
+        gl_FragColor = vec4(uColor * intensity, intensity);
+      }
+    `;
+
+    const wallLowerBias = Math.max(0, Math.min(1, Number(rp.wall_lower_bias) || 0));
+    const wallLightPos = lightPos.clone().lerp(floorLightPos, wallLowerBias);
+    const glowHeight = displayHeight * wallHeightFraction;
+    const glowModelHeight = this._displayToModelVector(this._displayHeightVector(glowHeight));
+    const glowHeightVec = new THREE.Vector3(glowModelHeight.x, glowModelHeight.y, glowModelHeight.z);
+
+    const meshes = [];
+    for (let index = 0; index < basePoints.length; index++) {
+      const start = basePoints[index];
+      const end = basePoints[(index + 1) % basePoints.length];
+
+      // Quick CPU cull: measure distance to the wall segment itself. Checking
+      // endpoints only makes long walls miss line lights that run through the middle.
+      const sx = Number(start[ax0]);
+      const sy = Number(start[ax1]);
+      const ex = Number(end[ax0]);
+      const ey = Number(end[ax1]);
+      const lx = Number(lightPos[ax0]);
+      const ly = Number(lightPos[ax1]);
+      const segX = ex - sx;
+      const segY = ey - sy;
+      const segLenSq = segX * segX + segY * segY;
+      const t = segLenSq > 0 ? Math.max(0, Math.min(1, ((lx - sx) * segX + (ly - sy) * segY) / segLenSq)) : 0;
+      const closestX = sx + segX * t;
+      const closestY = sy + segY * t;
+      const segmentDistance = Math.hypot(closestX - lx, closestY - ly);
+      if (segmentDistance > maxReach) continue;
+
+      const bottomStart = new THREE.Vector3(start.x, start.y, start.z);
+      const bottomEnd   = new THREE.Vector3(end.x,   end.y,   end.z);
+      const topStart    = bottomStart.clone().add(glowHeightVec);
+      const topEnd      = bottomEnd.clone().add(glowHeightVec);
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute([
+        bottomStart.x, bottomStart.y, bottomStart.z,
+        bottomEnd.x,   bottomEnd.y,   bottomEnd.z,
+        topEnd.x,      topEnd.y,      topEnd.z,
+        bottomStart.x, bottomStart.y, bottomStart.z,
+        topEnd.x,      topEnd.y,      topEnd.z,
+        topStart.x,    topStart.y,    topStart.z,
+      ], 3));
+
+      const material = new THREE.ShaderMaterial({
+        uniforms: {
+          uLightPos:   { value: wallLightPos },
+          uColor:      { value: uColor.clone() },
+          uPeak:       { value: peakBrightness },
+          uRadius:     { value: maxReach },
+          uFalloffExp: { value: falloffExp },
+          uIsSpot:     { value: isSpot ? 1.0 : 0.0 },
+          uSpotDir:    { value: isSpot ? spotDir : baseSpotDir },
+          uConeInner:  { value: Math.cos((rp.angle * (1 - rp.penumbra * 0.75)) || 0.5) },
+          uConeOuter:  { value: Math.cos(rp.angle || 0.95) },
+        },
+        vertexShader, fragmentShader,
+        transparent: true, depthWrite: false,
+        blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      });
+
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.renderOrder = 2.6;
+      meshes.push(mesh);
+    }
+    return meshes;
+  }
+
+  _spotDirectionVector(THREE, params, verticalModelAxis, ax0, ax1) {
+    const dir = new THREE.Vector3(
+      verticalModelAxis === "x" ? -1 : 0,
+      verticalModelAxis === "y" ? -1 : 0,
+      verticalModelAxis === "z" ? -1 : 0,
+    );
+    const tilt0 = Math.tan(this._normalOrientationDeg(params.tilt_x) * Math.PI / 180);
+    const tilt1 = Math.tan(this._normalOrientationDeg(params.tilt_y) * Math.PI / 180);
+    dir[ax0] += tilt0;
+    dir[ax1] += tilt1;
+    return dir.normalize();
+  }
+
+  _directionalTargetFactor(marker, target) {
+    const direction = marker?.orientationDir;
+    if (!direction) return 1;
+    const map = this._coordinateMap();
+    const verticalAxis = map[this._verticalAxis()];
+    const vertical = Number(direction[verticalAxis]) || 0;
+    const spread = this._orientationSpread(marker.orientationSpread);
+    const dot = target === "ceiling" ? vertical : target === "floor" ? -vertical : 0;
+    const focus = Math.max(0, Math.min(1, dot));
+    const softness = 1.45 - Math.min(1, spread) * 0.75;
+    return 0.08 + 0.92 * Math.pow(focus, softness);
+  }
+
   _zoneWallShadeMeshes(THREE, zone, darkness) {
     const opacity = Math.max(0, Math.min(0.62, darkness * 0.8));
     if (opacity <= 0.01) return [];
     const basePoints = this._offsetZonePoints(zone.points);
     if (basePoints.length < 2) return [];
     const displayHeight = Math.max(0.01, Math.abs(this._zoneHeight(zone)));
-    const modelHeight = this._displayToModelVector({ x: 0, y: 0, z: displayHeight });
+    const modelHeight = this._displayToModelVector(this._displayHeightVector(displayHeight));
     const heightVector = new THREE.Vector3(modelHeight.x, modelHeight.y, modelHeight.z);
     if (!heightVector.length()) return [];
     return basePoints.map((start, index) => {
@@ -4031,12 +5891,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     });
   }
 
-  _zoneMidShadeMesh(THREE, zone, darkness) {
+  _zoneCeilingShadeMesh(THREE, zone, darkness) {
     const opacity = Math.max(0, Math.min(0.5, darkness * 0.55));
     if (opacity <= 0.01) return null;
     const displayHeight = Math.max(0.01, Math.abs(this._zoneHeight(zone)));
     const shadeHeight = Math.max(0, Math.min(displayHeight, this._zoneShadeHeight(zone)));
-    const offset = this._displayToModelVector({ x: 0, y: 0, z: shadeHeight });
+    const offset = this._displayToModelVector(this._displayHeightVector(shadeHeight));
     const points = this._offsetZonePoints(zone.points).map((point) => ({
       x: point.x + offset.x,
       y: point.y + offset.y,
@@ -4062,6 +5922,31 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.renderOrder = 2.15;
     return mesh;
+  }
+
+  _createCeilingLightGlowMesh(THREE, zone, marker, lightType, lightRadius, color, brightness) {
+    const rp = this._resolveRenderParams(marker);
+    if (brightness <= 0.01) return null;
+    const displayHeight = Math.max(0.01, Math.abs(this._zoneHeight(zone)));
+    const shadeHeight = Math.max(0, Math.min(displayHeight, this._zoneShadeHeight(zone)));
+    const verticalModelAxis = this._coordinateMap()[this._verticalAxis()] || "y";
+    const ceilingLevel = this._zoneFloorLevel(zone) + this._displayToModelVector(this._displayHeightVector(shadeHeight))[verticalModelAxis] - 0.04;
+    const radius = Math.max(0.1, Number(rp.distance) || Number(lightRadius) || 1);
+    const glowBrightness = brightness * 0.35 * this._directionalTargetFactor(marker, "ceiling");
+    const material = this._createLightPoolMaterial(THREE, lightType, color, glowBrightness, {
+      softness: rp.decay <= 0 ? 1.8 : Math.max(0.8, Math.min(2.5, 2.4 / (rp.decay + 0.6))),
+      saturation: Math.max(0.35, Math.min(1.1, Number(rp.floor_saturation) || 0.75)),
+    });
+    // Use zone polygon as geometry — clips ceiling glow to zone boundary
+    const floorAxes = this._floorAxes();
+    const map = this._coordinateMap();
+    const ax0 = map[floorAxes[0]];
+    const ax1 = map[floorAxes[1]];
+    return this._buildPolygonFloorMesh(
+      THREE, zone,
+      Number(marker[ax0]), Number(marker[ax1]),
+      radius, ceilingLevel, material, 2.18
+    );
   }
 
   _refresh3DZonePointOverlay() {
@@ -4099,6 +5984,21 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._update3DZoneLabels(viewer.zoneLabels, viewer.THREE, viewer.camera, viewer.container);
   }
 
+  /** Returns the average radius (in model units) from zone center to its outermost point. */
+  _zoneRadius(zone) {
+    const center = this._zoneCenter(zone);
+    if (!center) return 50;
+    const floorAxes = this._floorAxes();
+    const map = this._coordinateMap();
+    const ax0 = map[floorAxes[0]];
+    const ax1 = map[floorAxes[1]];
+    return (zone.points || []).reduce((max, p) => {
+      const dx = Number(p[ax0]) - Number(center[ax0]);
+      const dy = Number(p[ax1]) - Number(center[ax1]);
+      return Math.max(max, Math.sqrt(dx * dx + dy * dy));
+    }, 10);
+  }
+
   _zoneCenter(zone) {
     const points = this._offsetZonePoints(zone.points || [], 0.08);
     if (!points.length) return null;
@@ -4111,6 +6011,57 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       },
       { x: 0, y: 0, z: 0 }
     );
+  }
+
+  /** Zone-wide gradient glow mesh — gradient clipped exactly to the zone polygon so it never bleeds outside walls. */
+  _zoneAreaGlowMesh(THREE, zone, brightness, color) {
+    const center = this._zoneCenter(zone);
+    if (!center || brightness < 0.01) return null;
+
+    const points = this._floorSurfacePoints(THREE, zone, 0.055);
+    if (points.length < 3) return null;
+
+    // Build triangulated geometry from zone polygon
+    const floorAxes = this._floorAxes();
+    const map = this._coordinateMap();
+    const ax0 = map[floorAxes[0]]; // e.g. "x"
+    const ax1 = map[floorAxes[1]]; // e.g. "y"
+
+    const displayPoints = points.map((p) => this._modelToDisplayPoint(p));
+    const centerDisplay = this._modelToDisplayPoint(center);
+    const cx = Number(centerDisplay[floorAxes[0]]);
+    const cy = Number(centerDisplay[floorAxes[1]]);
+
+    // Compute max distance from center to any vertex (for UV normalisation)
+    const maxDist = Math.max(1, ...displayPoints.map((p) => {
+      const dx = Number(p[floorAxes[0]]) - cx;
+      const dy = Number(p[floorAxes[1]]) - cy;
+      return Math.sqrt(dx * dx + dy * dy);
+    }));
+
+    const shapePoints = displayPoints.map((p) => new THREE.Vector2(Number(p[floorAxes[0]]), Number(p[floorAxes[1]])));
+    const indices = THREE.ShapeUtils.triangulateShape(shapePoints, []).flat();
+    if (!indices.length) return null;
+
+    const positions = points.flatMap((p) => [Number(p.x), Number(p.y), Number(p.z)]);
+    // UV: map each vertex so zone center = (0.5, 0.5) and edges approach 0/1
+    const uvs = displayPoints.flatMap((p) => {
+      const u = 0.5 + (Number(p[floorAxes[0]]) - cx) / (maxDist * 2);
+      const v = 0.5 + (Number(p[floorAxes[1]]) - cy) / (maxDist * 2);
+      return [u, v];
+    });
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+
+    // Shader material: flat diffuse wash clipped to zone polygon via UV
+    const material = this._createLightPoolMaterial(THREE, "area", color, brightness * 0.26);
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 2.05;
+    return mesh;
   }
 
   _build3DZonePointButtons(layer, THREE) {
@@ -4181,6 +6132,58 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     }));
   }
 
+  _floorSurfacePoints(THREE, zone, lift = 0.025) {
+    const targetLevel = this._zoneFloorLevel(zone);
+    return this._offsetZonePoints(zone.points || [], lift).map((point) => this._surfacePoint(THREE, point, lift, targetLevel));
+  }
+
+  _surfacePoint(THREE, point, lift = 0.025, targetLevel = null) {
+    const viewer = this._modelViewer;
+    if (!viewer?.pickableObjects?.length || !viewer?.modelBounds || !viewer?.surfaceRaycaster) return point;
+    const map = this._coordinateMap();
+    const verticalAxis = map[this._verticalAxis()] || "y";
+    const boundsMin = viewer.modelBounds.min[verticalAxis];
+    const boundsMax = viewer.modelBounds.max[verticalAxis];
+    if (!Number.isFinite(boundsMin) || !Number.isFinite(boundsMax)) return point;
+
+    const span = Math.max(1, boundsMax - boundsMin);
+    const origin = new THREE.Vector3(Number(point.x), Number(point.y), Number(point.z));
+    origin[verticalAxis] = boundsMax + span * 0.25;
+    const direction = new THREE.Vector3(
+      verticalAxis === "x" ? -1 : 0,
+      verticalAxis === "y" ? -1 : 0,
+      verticalAxis === "z" ? -1 : 0
+    );
+    const raycaster = viewer.surfaceRaycaster;
+    raycaster.set(origin, direction);
+    raycaster.near = 0;
+    raycaster.far = span * 1.75;
+    const hits = raycaster.intersectObjects(viewer.pickableObjects, true);
+    if (!hits.length) return point;
+
+    const desired = Number.isFinite(Number(targetLevel)) ? Number(targetLevel) : Number(point[verticalAxis]) - (Number(lift) || 0);
+    const hit = hits
+      .filter((entry) => entry?.point && Number.isFinite(entry.point[verticalAxis]))
+      .sort((a, b) => Math.abs(a.point[verticalAxis] - desired) - Math.abs(b.point[verticalAxis] - desired))[0];
+    if (!hit) return point;
+    const result = { x: hit.point.x, y: hit.point.y, z: hit.point.z };
+    const offset = Number.isFinite(Number(lift)) ? Number(lift) : 0.025;
+    result[verticalAxis] += offset;
+    return result;
+  }
+
+  _surfaceFloorLevel(THREE, zone, point, lift = 0.025) {
+    const verticalAxis = this._coordinateMap()[this._verticalAxis()] || "y";
+    const targetLevel = this._zoneFloorLevel(zone);
+    const probe = {
+      x: Number(point?.x) || 0,
+      y: Number(point?.y) || 0,
+      z: Number(point?.z) || 0,
+    };
+    probe[verticalAxis] = targetLevel + lift;
+    return this._surfacePoint(THREE, probe, lift, targetLevel)[verticalAxis];
+  }
+
   _displayToModelVector(vector) {
     const origin = this._displayToModelPoint({ x: 0, y: 0, z: 0 });
     const target = this._displayToModelPoint(vector);
@@ -4189,6 +6192,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       y: Number(target.y) - Number(origin.y),
       z: Number(target.z) - Number(origin.z),
     };
+  }
+
+  /** Returns a display-space vector with `magnitude` on the vertical axis and 0 on floor axes.
+   *  Use this whenever you need to build a "height" vector — it respects vertical_axis config. */
+  _displayHeightVector(magnitude) {
+    const v = { x: 0, y: 0, z: 0 };
+    v[this._verticalAxis()] = magnitude;
+    return v;
   }
 
   _ambientDarknessConfig() {
@@ -4261,6 +6272,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         const level = Number.isFinite(brightness) ? Math.max(0, Math.min(1, brightness / 255)) : 1;
         const intensity = this._normalizeLightIntensity(marker.lightIntensity) / 100;
         return {
+          marker,
+          row,
           brightness: level * intensity,
           color: this._lightColor(stateObj) || zone.color || "#f8d66d",
         };
@@ -4271,7 +6284,651 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const dominant = lights
       .filter((light) => light.brightness > 0)
       .sort((a, b) => b.brightness - a.brightness)[0];
-    return { brightness, color: dominant?.color || zone.color || "#f8d66d" };
+    return { brightness, color: dominant?.color || zone.color || "#f8d66d", lights };
+  }
+
+  _zoneCeilingDarkness(baseDarkness, lights = []) {
+    const strongestReduction = Math.max(
+      0,
+      ...lights.map((light) => {
+        const marker = light.marker || {};
+        const params = this._resolveRenderParams(marker);
+        const reduction = Math.max(0, Math.min(1, Number(params.intensity) * 0.35 || 0));
+        const brightness = Math.max(0, Math.min(1, Number(light.brightness) || 0));
+        return reduction * brightness;
+      })
+    );
+    return Math.max(0, Math.min(1, baseDarkness * (1 - strongestReduction)));
+  }
+
+  /** Returns all active positional lights inside a zone with their rendering properties. */
+  _positionalLights(zone, rowByKey) {
+    const zoneRadius = this._zoneRadius(zone);
+    const floorLevel = this._zoneFloorLevel(zone);
+    const map = this._coordinateMap();
+    const verticalModelAxis = map[this._verticalAxis()];
+    const zoneHeight = Math.max(10, Math.abs(this._zoneHeight(zone)));
+
+    return Object.entries(this._markers || {})
+      .flatMap(([key, marker]) => {
+        const row = rowByKey.get(key);
+        if (row?.primaryDomain !== "light") return [];
+        const lightType = this._normalizeLightType(marker.lightType) || "spot";
+        const renderMarkers = [{ marker, lightType }];
+        if (lightType === "spot") {
+          (marker.subSpots || []).forEach((subSpot) => {
+            renderMarkers.push({
+              marker: this._effectiveSubSpotMarker(marker, subSpot),
+              lightType: "spot",
+            });
+          });
+        } else if (this._supportsLightPath(lightType) && marker.lightShape === "rect") {
+          // Rectangle: generate closed loop from center + width/depth/angle
+          const rectMarker = { ...marker, lightPath: this._lightRectPoints(marker), _closeLoop: true };
+          renderMarkers.splice(0, renderMarkers.length, ...this._lightPathSampleMarkers(rectMarker, lightType, zoneRadius).map((pathMarker) => ({
+            marker: pathMarker,
+            lightType,
+          })));
+        } else if (this._supportsLightPath(lightType) && (marker.lightPath || []).length >= 2) {
+          renderMarkers.splice(0, renderMarkers.length, ...this._lightPathSampleMarkers(marker, lightType, zoneRadius).map((pathMarker) => ({
+            marker: pathMarker,
+            lightType,
+          })));
+        }
+
+        const stateObj = this._hass?.states?.[row.entityId];
+        if (String(stateObj?.state || "").toLowerCase() !== "on") return [];
+        const brightnessAttr = Number(stateObj?.attributes?.brightness);
+        const level = Number.isFinite(brightnessAttr) ? Math.max(0, Math.min(1, brightnessAttr / 255)) : 1;
+        const intensity = this._normalizeLightIntensity(marker.lightIntensity) / 100;
+        const brightness = level * intensity;
+        const color = this._lightColor(stateObj) || zone.color || "#fff5e0";
+        return renderMarkers
+          .filter((item) => this._pointInZone(item.marker, zone))
+          .map((item) => {
+            const renderMarker = item.marker;
+            const renderType = item.lightType;
+            const rp = this._resolveRenderParams(renderMarker);
+            // Height of this light above the zone floor (in model units)
+            const markerHeight = Number(renderMarker[verticalModelAxis]) || 0;
+            const heightAboveFloor = Math.max(5, markerHeight - floorLevel);
+            // Fraction of zone height where the light sits (0 = floor, 1 = ceiling)
+            const heightFraction = Math.min(1, heightAboveFloor / zoneHeight);
+
+            // Auto radius: spot uses cone physics (wider pool for higher mount),
+            // lamp uses fixed fraction (floor/table lamp stays tight regardless of height),
+            // indirect uses zone-relative spread
+            const stored = Number(renderMarker.lightRadius);
+            let lightRadius;
+            if (stored > 0) {
+              lightRadius = stored;
+            } else if (Number(rp.distance) > 0) {
+              lightRadius = Number(rp.distance);
+            } else if (renderType === "spot") {
+              // Cone: pool radius ≈ height × tan(~30°) — higher ceiling = wider pool
+              lightRadius = Math.max(10, heightAboveFloor * 0.60);
+            } else if (renderType === "cove") {
+              // Cove: soft ambient downwash, covers most of the zone
+              lightRadius = Math.max(10, zoneRadius * 0.55);
+            } else if (renderType === "linear") {
+              // Linear strip: medium-width elongated pool
+              lightRadius = Math.max(10, zoneRadius * 0.32);
+            } else {
+              // Lamp: low mount, tight spread regardless of height
+              lightRadius = Math.max(10, zoneRadius * 0.22);
+            }
+
+            return { marker: renderMarker, row, lightType: renderType, lightRadius, heightAboveFloor, heightFraction, color, brightness: brightness * (rp.intensity ?? 1) };
+          });
+      })
+      .filter(Boolean);
+  }
+
+  /**
+   * Generates 4 closed-loop model-space points for a rectangle light shape.
+   * Center = marker position, width/depth in model units, angle = rotation degrees (floor plane).
+   */
+  _lightRectPoints(marker) {
+    const map = this._coordinateMap();
+    const floorAxes = this._floorAxes();
+    const ax0 = map[floorAxes[0]]; // e.g. "x"
+    const ax1 = map[floorAxes[1]]; // e.g. "z"
+    const verticalAxis = map[this._verticalAxis()]; // e.g. "y"
+
+    const rect = marker.lightRect || {};
+    const hw = Math.max(1, Number(rect.width)  || 100) / 2;
+    const hd = Math.max(1, Number(rect.depth)  || 80)  / 2;
+    const angleDeg = Number(rect.angle) || 0;
+    const rad = angleDeg * Math.PI / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const cx = Number(marker[ax0]) || 0;
+    const cy = Number(marker[verticalAxis]) || 0;
+    const cz = Number(marker[ax1]) || 0;
+
+    // 4 corners in local space (ax0, ax1 axes), then rotated
+    const corners = [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]];
+    const points = corners.map(([lx, lz]) => {
+      const rx = lx * cos - lz * sin;
+      const rz = lx * sin + lz * cos;
+      const pt = { x: 0, y: 0, z: 0 };
+      pt[ax0] = cx + rx;
+      pt[ax1] = cz + rz;
+      pt[verticalAxis] = cy;
+      return pt;
+    });
+
+    // Don't duplicate the start point — _lightPathSampleMarkers handles closeLoop internally
+    return points;
+  }
+
+  _lightPathSampleMarkers(marker, lightType, zoneRadius) {
+    const path = (marker.lightPath || [])
+      .map((point) => ({ x: Number(point.x), y: Number(point.y), z: Number(point.z) }))
+      .filter((point) => this._isSafeModelPoint(point));
+    if (path.length < 2) return [];
+    const rp = this._resolveRenderParams(marker);
+    const baseRadius = Number(marker.lightRadius) > 0
+      ? Number(marker.lightRadius)
+      : Math.max(10, zoneRadius * (lightType === "linear" ? 0.22 : 0.35));
+    // Keep line lights continuous, but cap the whole path instead of each segment.
+    // A square/loop used to multiply into many expensive glow meshes per side.
+    // Step must be small enough that adjacent sample radii overlap — not smaller.
+    // wall_reach ≈ rp.distance (130–160), so step ≤ distance * 0.4 ensures full overlap.
+    const maxStep = Math.max(4, Math.min(60, baseRadius * (lightType === "linear" ? 0.38 : 0.45)));
+    const maxSamples = lightType === "linear" ? 20 : 16;
+    const segments = [];
+    let totalDistance = 0;
+    const closeLoop = marker._closeLoop === true;
+    const segPath = closeLoop ? [...path, path[0]] : path; // add closing segment for closed loops
+    for (let i = 0; i < segPath.length - 1; i += 1) {
+      const start = segPath[i];
+      const end = segPath[i + 1];
+      const distance = Math.hypot(end.x - start.x, end.y - start.y, end.z - start.z);
+      if (distance < 0.001) continue;
+      segments.push({ start, end, distance, offset: totalDistance });
+      totalDistance += distance;
+    }
+    if (!segments.length) return [];
+
+    // For closed loops: distribute samples evenly WITHOUT landing on start again at the end
+    const targetCount = Math.min(maxSamples, Math.max(closeLoop ? 4 : 2, Math.ceil(totalDistance / maxStep) + (closeLoop ? 0 : 1)));
+    const samples = [];
+    const pushSample = (point, tangent) => {
+      const previous = samples[samples.length - 1];
+      if (previous && Math.hypot(previous.x - point.x, previous.y - point.y, previous.z - point.z) < 0.001) return;
+      const oriented = this._orientedPathPoint(point, tangent, baseRadius, rp);
+      samples.push({
+        ...marker,
+        x: Number(oriented.point.x.toFixed(4)),
+        y: Number(oriented.point.y.toFixed(4)),
+        z: Number(oriented.point.z.toFixed(4)),
+        lightRadius: baseRadius,
+        lightType,
+        orientationDir: oriented.direction,
+        orientationSpread: oriented.spread,
+      });
+    };
+
+    let segmentIndex = 0;
+    for (let index = 0; index < targetCount; index += 1) {
+      // For closed loops: distribute from 0 to totalDistance*(1-1/N) so last sample
+      // doesn't overlap with first (they're the same point on a rectangle)
+      const distanceAlongPath = targetCount === 1 ? 0
+        : closeLoop
+          ? (totalDistance * index) / targetCount
+          : (totalDistance * index) / (targetCount - 1);
+      while (
+        segmentIndex < segments.length - 1 &&
+        distanceAlongPath > segments[segmentIndex].offset + segments[segmentIndex].distance
+      ) {
+        segmentIndex += 1;
+      }
+      const segment = segments[segmentIndex];
+      const localDistance = Math.max(0, Math.min(segment.distance, distanceAlongPath - segment.offset));
+      const t = segment.distance > 0 ? localDistance / segment.distance : 0;
+      const tangent = {
+        x: segment.end.x - segment.start.x,
+        y: segment.end.y - segment.start.y,
+        z: segment.end.z - segment.start.z,
+      };
+      pushSample({
+        x: segment.start.x + (segment.end.x - segment.start.x) * t,
+        y: segment.start.y + (segment.end.y - segment.start.y) * t,
+        z: segment.start.z + (segment.end.z - segment.start.z) * t,
+      }, tangent);
+    }
+    return samples;
+  }
+
+  _orientedPathPoint(point, tangent, radius, params = {}) {
+    const map = this._coordinateMap();
+    const floorAxes = this._floorAxes();
+    const ax0 = map[floorAxes[0]];
+    const ax1 = map[floorAxes[1]];
+    const verticalAxis = map[this._verticalAxis()];
+    const tx = Number(tangent?.[ax0]) || 0;
+    const ty = Number(tangent?.[ax1]) || 0;
+    const len = Math.hypot(tx, ty);
+    const side = this._orientationBlend(params.path_side);
+    const angle = this._normalOrientationDeg(params.path_angle) * Math.PI / 180;
+    const spread = this._orientationSpread(params.path_spread);
+    if (!len) {
+      return { point, direction: null, spread };
+    }
+    const horizontalWeight = Math.cos(angle);
+    const verticalWeight = Math.sin(angle);
+    const normal0 = -ty / len * side * Math.abs(horizontalWeight);
+    const normal1 = tx / len * side * Math.abs(horizontalWeight);
+    const offset = Math.max(0, Number(radius) || 0) * 0.35;
+    const orientedPoint = { ...point };
+    orientedPoint[ax0] = Number(point[ax0]) + normal0 * offset;
+    orientedPoint[ax1] = Number(point[ax1]) + normal1 * offset;
+    orientedPoint[verticalAxis] = Number(point[verticalAxis]);
+    const direction = { x: 0, y: 0, z: 0 };
+    direction[ax0] = normal0;
+    direction[ax1] = normal1;
+    direction[verticalAxis] = verticalWeight;
+    const directionLength = Math.hypot(direction.x, direction.y, direction.z);
+    if (directionLength < 0.001) return { point: orientedPoint, direction: null, spread };
+    direction.x /= directionLength;
+    direction.y /= directionLength;
+    direction.z /= directionLength;
+    return { point: orientedPoint, direction, spread };
+  }
+
+  /** Returns the average vertical-axis position of zone floor points in model space. */
+  _zoneFloorLevel(zone) {
+    const map = this._coordinateMap();
+    const va = map[this._verticalAxis()];
+    const pts = zone.points || [];
+    if (!pts.length) return 0;
+    return pts.reduce((sum, p) => sum + (Number(p[va]) || 0), 0) / pts.length;
+  }
+
+  /** Parses a CSS color string (hex or rgb()) into {r, g, b} integers. */
+  _cssColorToRgba(cssColor) {
+    const rgbMatch = String(cssColor).match(/rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/);
+    if (rgbMatch) return { r: Number(rgbMatch[1]), g: Number(rgbMatch[2]), b: Number(rgbMatch[3]) };
+    let hex = String(cssColor).replace("#", "");
+    if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
+    if (hex.length === 6) {
+      return {
+        r: parseInt(hex.slice(0, 2), 16),
+        g: parseInt(hex.slice(2, 4), 16),
+        b: parseInt(hex.slice(4, 6), 16),
+      };
+    }
+    return { r: 255, g: 245, b: 200 }; // warm white fallback
+  }
+
+  /** Generates a canvas-based radial gradient texture for a light pool. */
+  /** Returns a ShaderMaterial implementing physical light attenuation per light type. */
+  _createLightPoolMaterial(THREE, lightType, cssColor, brightness, options = {}) {
+    const { r, g, b } = this._cssColorToRgba(cssColor);
+    const colorValue = new THREE.Color(r / 255, g / 255, b / 255);
+    const saturationValue = Number(options.saturation);
+    const saturation = Number.isFinite(saturationValue) ? Math.max(0, Math.min(1.5, saturationValue)) : 1;
+    const luminance = colorValue.r * 0.2126 + colorValue.g * 0.7152 + colorValue.b * 0.0722;
+    const neutral = new THREE.Color(luminance, luminance, luminance);
+    const uColor = neutral.lerp(colorValue, saturation);
+    // Allow brightness above 1.0 for stronger floor pools — AdditiveBlending handles it gracefully
+    const uBrightness = Math.max(0.05, brightness);
+    const softnessValue = Number(options.softness);
+    const uSoftness = Number.isFinite(softnessValue) ? Math.max(0.4, Math.min(2.5, softnessValue)) : 1;
+
+    // Shared vertex shader — passes UV and world position to fragment
+    const vertexShader = `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+
+    let fragmentShader;
+
+    if (lightType === "spot") {
+      // Physical spot with ACES filmic tonemapping — prevents blown-out white core,
+      // keeps floor tile texture visible even at peak intensity
+      fragmentShader = `
+        uniform vec3  uColor;
+        uniform float uBrightness;
+        uniform float uInner;
+        uniform float uOuter;
+        varying vec2 vUv;
+
+        // ACES filmic tonemapping curve (Narkowicz 2015 approximation)
+        vec3 aces(vec3 x) {
+          return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+        }
+
+        void main() {
+          float dist = length(vUv - vec2(0.5)) * 2.0;
+          if (dist >= uOuter) { gl_FragColor = vec4(0.0); return; }
+
+          // Smooth penumbra — linear falloff from inner core to outer edge
+          float penumbra = 1.0 - smoothstep(uInner, uOuter, dist);
+
+          // Physical 1/r² raw intensity — this will overexpose the core intentionally
+          float r2 = max(0.001, dist / max(uInner, 0.001));
+          float raw = 1.0 / (1.0 + r2 * r2 * 2.0);
+          float core = max(0.0, 1.0 - dist / uInner);
+          float rawIntensity = mix(raw, 1.5, core) * penumbra * uBrightness;
+
+          // Apply ACES filmic curve — rolls off highlights smoothly,
+          // underlying floor texture stays visible at the hotspot center
+          vec3 hdrColor = uColor * rawIntensity;
+          vec3 tonemapped = aces(hdrColor);
+
+          // Use luminance of tonemapped result as alpha
+          float alpha = dot(tonemapped, vec3(0.2126, 0.7152, 0.0722));
+          gl_FragColor = vec4(tonemapped, alpha);
+        }
+      `;
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          uColor:      { value: uColor },
+          uBrightness: { value: uBrightness },
+          uInner:      { value: 0.18 },
+          uOuter:      { value: Math.min(0.99, 0.96 * uSoftness) },
+        },
+        vertexShader, fragmentShader,
+        transparent: true, depthWrite: false,
+        blending: THREE.AdditiveBlending, side: THREE.FrontSide,
+      });
+
+    } else if (lightType === "cove") {
+      // Cove: indirect ceiling bounce — no hotspot, very flat even wash, gentle edge fade
+      fragmentShader = `
+        uniform vec3  uColor;
+        uniform float uBrightness;
+        varying vec2 vUv;
+        void main() {
+          float dist = length(vUv - vec2(0.5)) * 2.0;
+          if (dist >= 1.0) { gl_FragColor = vec4(0.0); return; }
+          // Almost flat across the whole pool — simulates multi-bounce GI
+          float falloff = pow(max(0.0, 1.0 - dist), 0.6);
+          float intensity = falloff * uBrightness * 0.75;
+          gl_FragColor = vec4(uColor * intensity, intensity);
+        }
+      `;
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          uColor:      { value: uColor },
+          uBrightness: { value: uBrightness * Math.min(1.4, uSoftness) },
+        },
+        vertexShader, fragmentShader,
+        transparent: true, depthWrite: false,
+        blending: THREE.AdditiveBlending, side: THREE.FrontSide,
+      });
+
+    } else if (lightType === "linear") {
+      // Linear LED strip: defined bright band, moderate falloff — elongated by mesh scale
+      fragmentShader = `
+        uniform vec3  uColor;
+        uniform float uBrightness;
+        varying vec2 vUv;
+        void main() {
+          float dist = length(vUv - vec2(0.5)) * 2.0;
+          if (dist >= 1.0) { gl_FragColor = vec4(0.0); return; }
+          float falloff = pow(max(0.0, 1.0 - dist), 1.1);
+          float intensity = falloff * uBrightness;
+          gl_FragColor = vec4(uColor * intensity, intensity);
+        }
+      `;
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          uColor:      { value: uColor },
+          uBrightness: { value: uBrightness * Math.min(1.25, uSoftness) },
+        },
+        vertexShader, fragmentShader,
+        transparent: true, depthWrite: false,
+        blending: THREE.AdditiveBlending, side: THREE.FrontSide,
+      });
+
+    } else if (lightType === "lamp") {
+      // Lamp downward cone: tight bright centre, smooth falloff
+      fragmentShader = `
+        uniform vec3  uColor;
+        uniform float uBrightness;
+        varying vec2 vUv;
+        void main() {
+          float dist = length(vUv - vec2(0.5)) * 2.0;
+          if (dist >= 1.0) { gl_FragColor = vec4(0.0); return; }
+          float r2 = max(0.001, dist);
+          float attenuation = min(1.0, 0.018 / (r2 * r2));
+          float cone = pow(max(0.0, 1.0 - dist), 1.4);
+          float intensity = mix(attenuation, cone, 0.5) * uBrightness;
+          gl_FragColor = vec4(uColor * intensity, intensity);
+        }
+      `;
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          uColor:      { value: uColor },
+          uBrightness: { value: uBrightness * Math.min(1.25, uSoftness) },
+        },
+        vertexShader, fragmentShader,
+        transparent: true, depthWrite: false,
+        blending: THREE.AdditiveBlending, side: THREE.FrontSide,
+      });
+
+    } else {
+      // "area" type — uniform flat wash across the polygon, UV used only for soft edge fade
+      // dist clamp is raised to 1.5 so polygon corners (UV dist ~1.0–1.4) are never clipped
+      fragmentShader = `
+        uniform vec3  uColor;
+        uniform float uBrightness;
+        varying vec2 vUv;
+        void main() {
+          float dist = length(vUv - vec2(0.5)) * 2.0;
+          // Gentle edge fade only — no hard clip, polygon geometry provides the real boundary
+          float edge = pow(max(0.0, 1.0 - dist * 0.55), 0.4);
+          float intensity = edge * uBrightness;
+          gl_FragColor = vec4(uColor * intensity, intensity);
+        }
+      `;
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          uColor:      { value: uColor },
+          uBrightness: { value: uBrightness * Math.min(1.4, uSoftness) },
+        },
+        vertexShader, fragmentShader,
+        transparent: true, depthWrite: false,
+        blending: THREE.AdditiveBlending, side: THREE.FrontSide,
+      });
+    }
+  }
+
+  /**
+   * Builds a floor mesh whose geometry is the zone polygon (hard clip to zone boundary).
+   * UV coordinates are computed so that (0.5, 0.5) = lightCenterAx0/Ax1 and
+   * UV distance 1.0 = poolRadius from center — matching the pool shaders' dist check.
+   */
+  _buildPolygonFloorMesh(THREE, zone, lightCenterAx0, lightCenterAx1, poolRadius, floorLift, material, renderOrder) {
+    const points = this._offsetZonePoints(zone.points || [], floorLift);
+    if (points.length < 3) return null;
+
+    const floorAxes = this._floorAxes();
+    const map = this._coordinateMap();
+    const ax0 = map[floorAxes[0]];
+    const ax1 = map[floorAxes[1]];
+
+    // Triangulate using display-space (X/Z floor axes)
+    const displayPoints = points.map((p) => this._modelToDisplayPoint(p));
+    const shapePoints = displayPoints.map((p) => new THREE.Vector2(Number(p[floorAxes[0]]), Number(p[floorAxes[1]])));
+    const indices = THREE.ShapeUtils.triangulateShape(shapePoints, []).flat();
+    if (!indices.length) return null;
+
+    const positions = points.flatMap((p) => [p.x, p.y, p.z]);
+    // UV: map each vertex relative to the light's floor hit position, scaled by poolRadius
+    const diam = poolRadius * 2;
+    const uvs = displayPoints.flatMap((p) => [
+      0.5 + (Number(p[floorAxes[0]]) - lightCenterAx0) / diam,
+      0.5 + (Number(p[floorAxes[1]]) - lightCenterAx1) / diam,
+    ]);
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("uv",       new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+
+    // Force DoubleSide — polygon winding depends on how zone points were drawn,
+    // so FrontSide could make the floor invisible if winding faces downward.
+    if (material) material.side = THREE.DoubleSide;
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = renderOrder;
+    return mesh;
+  }
+
+  /** Creates a Three.js mesh for a single positional light pool on the floor. */
+  /** Simulated GI bounce — wide, very soft secondary mesh that represents light reflected
+   *  off the bright floor hotspot back up onto surrounding surfaces (3-bounce approximation). */
+  _createGIBounceMesh(THREE, zone, marker, lightType, lightRadius, color, brightness) {
+    const rp = this._resolveRenderParams(marker);
+    // Only types with gi_brightness > 0 produce a GI bounce
+    if ((rp.gi_brightness ?? 0) < 0.01) return null;
+    if (brightness < 0.05) return null;
+
+    const map = this._coordinateMap();
+    const verticalModelAxis = map[this._verticalAxis()];
+    const floorLevel = this._surfaceFloorLevel(THREE, zone, marker, 0.06); // just above floor pool
+
+    // GI bounce: 3x pool radius, very low intensity warm wash
+    const giRadius = lightRadius * Math.max(1, Math.min(6, Number(rp.gi_radius) || 3.2));
+    const { r, g, b } = this._cssColorToRgba(color);
+    // Warm up the bounce color slightly (simulate warm tile/floor color bleeding)
+    const warmth = Math.max(0, Math.min(1, Number(rp.gi_warmth) || 0));
+    const bounceColor = new THREE.Color(
+      Math.min(1, (r / 255) * (1 + warmth * 0.22)),
+      Math.min(1, (g / 255) * (1 - warmth * 0.12)),
+      Math.min(1, (b / 255) * (1 - warmth * 0.38))
+    );
+
+    const vertexShader = `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+    // 3-bounce simulation: each bounce loses ~60% energy, combined as single soft wash
+    // Stays flat across most of the radius then fades at the edge
+    const fragmentShader = `
+      uniform vec3  uColor;
+      uniform float uBrightness;
+      varying vec2 vUv;
+      void main() {
+        float dist = length(vUv - vec2(0.5)) * 2.0;
+        if (dist >= 1.0) { gl_FragColor = vec4(0.0); return; }
+        // Very shallow power — nearly flat across full radius (simulates diffuse GI fill)
+        float bounce1 = pow(max(0.0, 1.0 - dist), 0.5) * 0.40; // 1st bounce
+        float bounce2 = pow(max(0.0, 1.0 - dist), 0.8) * 0.16; // 2nd bounce (attenuated)
+        float bounce3 = pow(max(0.0, 1.0 - dist), 1.2) * 0.06; // 3rd bounce (nearly gone)
+        float intensity = (bounce1 + bounce2 + bounce3) * uBrightness;
+        gl_FragColor = vec4(uColor * intensity, intensity);
+      }
+    `;
+
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor:      { value: bounceColor },
+        uBrightness: { value: Math.max(0, brightness * (rp.gi_brightness ?? 0.28)) },
+      },
+      vertexShader, fragmentShader,
+      transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, side: THREE.FrontSide,
+    });
+
+    // Compute tilt offset for GI center
+    const floorAxesGI = this._floorAxes();
+    const mapGI = this._coordinateMap();
+    const ax0GI = mapGI[floorAxesGI[0]];
+    const ax1GI = mapGI[floorAxesGI[1]];
+    const tiltXGI = (this._normalOrientationDeg(rp.tilt_x) || 0) * Math.PI / 180;
+    const tiltYGI = (this._normalOrientationDeg(rp.tilt_y) || 0) * Math.PI / 180;
+    const hGI = Math.max(0, Number(marker[verticalModelAxis] || 0) - floorLevel);
+    const offAx0 = hGI * Math.tan(tiltXGI);
+    const offAx1 = hGI * Math.tan(tiltYGI);
+    const centerAx0 = Number(marker[ax0GI]) + offAx0;
+    const centerAx1 = Number(marker[ax1GI]) + offAx1;
+
+    // Polygon mesh — clipped to zone boundary, no bleed through walls
+    const mesh = this._buildPolygonFloorMesh(
+      THREE, zone, centerAx0, centerAx1, giRadius, floorLevel + 0.06, material, 2.03
+    );
+    return mesh;
+  }
+
+  _createFloorLightGlowMesh(THREE, zone, marker, lightType, lightRadius, color, brightness) {
+    const map = this._coordinateMap();
+    const verticalModelAxis = map[this._verticalAxis()];
+    const floorLevel = this._surfaceFloorLevel(THREE, zone, marker, 0.055);
+    const radius = Math.max(0.1, Number(lightRadius) || 0.8);
+    const rp = this._resolveRenderParams(marker);
+    // For line types, directionalTargetFactor can return 0.08 (orientation points up to ceiling).
+    // Use intensity directly so the floor brightness is controlled by render params.
+    const isLineTypeCheck = lightType === "cove" || lightType === "linear";
+    const floorBrightness = brightness * (isLineTypeCheck ? (rp.intensity ?? 1) : this._directionalTargetFactor(marker, "floor"));
+    const floorAxes = this._floorAxes();
+    const ax0 = map[floorAxes[0]];
+    const ax1 = map[floorAxes[1]];
+    const primaryModelAxis = ax0;
+    const elongation = lightType === "linear" ? Math.max(1, Number(rp.width) / Math.max(1, radius)) : 1;
+    const materialOptions = {
+      softness: rp.decay <= 0 ? 1.8 : Math.max(0.4, Math.min(2.5, 2.4 / (rp.decay + 0.6))),
+      saturation: rp.floor_saturation ?? 1,
+    };
+    const group = new THREE.Group();
+
+    // For cove/linear: samples sit on the ceiling perimeter, so their individual radius
+    // never reaches the floor center. Center on zone centroid and use a very large radius
+    // so all UV distances stay near-zero → nearly uniform ambient fill (no hotspot).
+    const isLineType = lightType === "cove" || lightType === "linear";
+    const zoneCenter = isLineType ? this._zoneCenter(zone) : null;
+    const zoneRadius  = isLineType ? this._zoneRadius(zone) : 0;
+    // 8× zone radius → UV dist at zone edge ≈ 0.125 → cove shader falloff ≈ 0.92 (nearly flat)
+    const floorRadius = isLineType ? zoneRadius * 8 : radius;
+    const floorCenterAx0 = isLineType && zoneCenter ? Number(zoneCenter[ax0]) : Number(marker[ax0]);
+    const floorCenterAx1 = isLineType && zoneCenter ? Number(zoneCenter[ax1]) : Number(marker[ax1]);
+
+    // Compute tilt-based floor offset — only relevant for spot/lamp
+    const tiltX = (this._normalOrientationDeg(rp.tilt_x) || 0) * Math.PI / 180;
+    const tiltY = (this._normalOrientationDeg(rp.tilt_y) || 0) * Math.PI / 180;
+    const heightAboveFloor = Math.max(0, Number(marker[verticalModelAxis] || 0) - floorLevel);
+    const tiltOffsetAx0 = isLineType ? 0 : heightAboveFloor * Math.tan(tiltX);
+    const tiltOffsetAx1 = isLineType ? 0 : heightAboveFloor * Math.tan(tiltY);
+    const tiltMag = Math.hypot(tiltX, tiltY);
+    const tiltRadiusScale = isLineType ? 1 : (1 + Math.min(0.8, tiltMag * 0.5));
+
+    const hitAx0 = floorCenterAx0 + tiltOffsetAx0;
+    const hitAx1 = floorCenterAx1 + tiltOffsetAx1;
+
+    const addPoolLayer = (scale, brightnessScale, renderOrder, lift = 0) => {
+      const layerRadius = floorRadius * scale * tiltRadiusScale;
+      const material = this._createLightPoolMaterial(THREE, lightType, color, floorBrightness * brightnessScale, materialOptions);
+      // Polygon mesh — uses zone boundary as geometry, UV-mapped to this light's hit position
+      const mesh = this._buildPolygonFloorMesh(
+        THREE, zone, hitAx0, hitAx1, layerRadius, floorLevel + lift, material, renderOrder
+      );
+      if (mesh) group.add(mesh);
+    };
+
+    if (isLineType) {
+      // Cove/linear: single flat uniform fill — radius is already 8×zoneRadius, so UV is near-zero everywhere
+      addPoolLayer(1.0, 0.85, 2.05, 0.003);
+    } else {
+      // Spot/lamp: layered pools with hotspot
+      const outerSize       = rp.floor_outer_size       ?? 5.0;
+      const outerBrightness = rp.floor_outer_brightness  ?? 0.12;
+      addPoolLayer(outerSize,       outerBrightness, 2.03, 0.001); // ultra-wide ambient scatter
+      addPoolLayer(outerSize * 0.5, outerBrightness * 3.2, 2.05, 0.002); // wide mid-glow
+      addPoolLayer(1.0, 1.0, 2.06, 0.004); // main pool
+      addPoolLayer(rp.floor_hotspot_size ?? (lightType === "lamp" ? 0.36 : 0.46), 1.3, 2.08, 0.008); // hotspot
+    }
+
+    group.renderOrder = 2.05;
+    return group;
   }
 
   _lightColor(stateObj) {
@@ -4344,7 +7001,36 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   }
 
   _verticalAxis() {
-    return ["x", "y", "z"].includes(this._config.vertical_axis) ? this._config.vertical_axis : "z";
+    return ["x", "y", "z"].includes(this._config.vertical_axis) ? this._config.vertical_axis : "y";
+  }
+
+  /** Returns the HTML for the axes gizmo legend (X/Y/Z with colours + ↑ on the vertical axis). */
+  _axesLegendHTML() {
+    const map = this._coordinateMap(); // display→model axis
+    const verticalDisplay = this._verticalAxis(); // which display axis is height
+    const verticalModel = map[verticalDisplay];   // which Three.js model axis is up
+
+    // Build inverse map: Three.js model axis → display axis label
+    const inv = {};
+    for (const [display, model] of Object.entries(map)) inv[model] = display.toUpperCase();
+
+    return [
+      { model: "x", color: "#ef4444" },
+      { model: "y", color: "#22c55e" },
+      { model: "z", color: "#3b82f6" },
+    ].map(({ model, color }) => {
+      const label = inv[model] || model.toUpperCase();
+      const isUp = model === verticalModel;
+      return `<span style="color:${color};font-weight:700">${label}${isUp ? "↑" : ""}</span>`;
+    }).join("");
+  }
+
+  _axisLabelHTML(displayAxis) {
+    const axis = ["x", "y", "z"].includes(displayAxis) ? displayAxis : "x";
+    const modelAxis = this._coordinateMap()[axis] || axis;
+    const colors = { x: "#ef4444", y: "#22c55e", z: "#3b82f6" };
+    const isUp = axis === this._verticalAxis();
+    return `<span class="axis-label" style="color:${colors[modelAxis] || "#94a3b8"}">${axis.toUpperCase()}${isUp ? "↑" : ""}</span>`;
   }
 
   _floorAxes() {
@@ -4364,6 +7050,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _constrained3DPoint(key, point, camera) {
     const existing = this._markers[key];
+    return this._constrained3DPointForExisting(existing, point, camera);
+  }
+
+  _constrained3DPointForExisting(existing, point, camera) {
     if (!existing) return point;
     const mode = this._effectivePlacementMode(camera);
     if (mode === "surface") return point;
@@ -4401,13 +7091,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (!Number.isFinite(number)) return;
     if (!options.skipHistory) this._pushMarkerHistory();
     const modelAxis = this._coordinateMap()[axis] || axis;
-    this._markers[key][modelAxis] = Number(number.toFixed(4));
+    const rounded = Math.round(number);
+    this._markers[key][modelAxis] = rounded;
     if (!options.skipSave) this._saveMarkers();
     this._refresh3DMarkerOverlay();
     if (!options.skipPanelRefresh) this._refreshSelectedMarkerPanel();
     const row = this.shadowRoot?.querySelector(`[data-device="${this._cssEscape(key)}"]`);
     const input = row?.querySelector(`[data-coordinate="${axis}"]`);
-    if (input && document.activeElement !== input) input.value = this._formatCoordinate(number);
+    if (input && document.activeElement !== input) input.value = this._formatCoordinateInteger(rounded);
   }
 
   _updateMarkerAction(key, type, value) {
@@ -4462,6 +7153,215 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (!options.skipPanelRefresh && this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
   }
 
+  _subSpotAt(key, index) {
+    const marker = this._markers[key];
+    if (!marker || !Number.isInteger(index) || index < 0) return null;
+    if (!Array.isArray(marker.subSpots)) marker.subSpots = [];
+    return marker.subSpots[index] || null;
+  }
+
+  _addSubSpot(key) {
+    const marker = this._markers[key];
+    if (!marker || (this._normalizeLightType(marker.lightType) || "spot") !== "spot") return;
+    this._pushMarkerHistory();
+    if (!Array.isArray(marker.subSpots)) marker.subSpots = [];
+    const floorAxes = this._floorAxes();
+    const displayPoint = this._modelToDisplayPoint(marker);
+    displayPoint[floorAxes[0]] = Number(displayPoint[floorAxes[0]] || 0) + Math.max(10, Number(marker.lightRadius) || 20);
+    const modelPoint = this._displayToModelPoint(displayPoint);
+    marker.subSpots.push({
+      name: `Spot ${marker.subSpots.length + 1}`,
+      lightRadius: "",
+      lightPreset: "",
+      renderParams: {},
+      x: Math.round(modelPoint.x),
+      y: Math.round(modelPoint.y),
+      z: Math.round(modelPoint.z),
+    });
+    this._saveMarkers();
+    this._refresh3DMarkerOverlay();
+    this._refreshSelectedMarkerPanel();
+  }
+
+  _deleteSubSpot(key, index) {
+    const marker = this._markers[key];
+    if (!marker?.subSpots?.[index]) return;
+    this._pushMarkerHistory();
+    marker.subSpots.splice(index, 1);
+    marker.subSpots.forEach((spot, spotIndex) => {
+      if (!spot.name || /^Spot \d+$/.test(spot.name)) spot.name = `Spot ${spotIndex + 1}`;
+    });
+    if (this._pendingSubSpot?.key === key && this._pendingSubSpot?.index === index) this._pendingSubSpot = null;
+    this._saveMarkers();
+    this._refresh3DMarkerOverlay();
+    this._refreshSelectedMarkerPanel();
+  }
+
+  _startSubSpotMove(key, index) {
+    if (!this._subSpotAt(key, index)) return;
+    this._pendingSubSpot = { key, index };
+    this._pendingDeviceKey = null;
+    const status = this.shadowRoot?.querySelector("[data-model-status]");
+    if (status) {
+      status.hidden = false;
+      status.textContent = `Click the 3D model to move sub-spot ${index + 1}. ${this._placementModeText()}`;
+    }
+  }
+
+  _updateSubSpotCoordinate(key, index, axis, value, options = {}) {
+    const subSpot = this._subSpotAt(key, index);
+    if (!subSpot || !["x", "y", "z"].includes(axis)) return;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return;
+    if (!this._isSafeCoordinateValue(number)) {
+      this._showModelStatus(`Ignored unsafe path coordinate (${number}).`);
+      this._refreshSelectedMarkerPanel();
+      return;
+    }
+    if (!options.skipHistory) this._pushMarkerHistory();
+    const modelAxis = this._coordinateMap()[axis] || axis;
+    subSpot[modelAxis] = Math.round(number);
+    if (!options.skipSave) this._saveMarkers();
+    if (options.skipSave) this._refreshYamlExport();
+    this._refresh3DMarkerOverlay();
+    if (!options.skipPanelRefresh) this._refreshSelectedMarkerPanel();
+  }
+
+  _updateSubSpotLightRadius(key, index, value, options = {}) {
+    const subSpot = this._subSpotAt(key, index);
+    if (!subSpot) return;
+    if (!options.skipHistory) this._pushMarkerHistory();
+    subSpot.lightRadius = this._normalizeLightRadius(value);
+    if (!options.skipSave) this._saveMarkers();
+    if (options.skipSave) this._refreshYamlExport();
+    this._refresh3DZoneOverlay();
+    if (!options.skipPanelRefresh && this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+  }
+
+  _updateSubSpotPreset(key, index, value) {
+    const subSpot = this._subSpotAt(key, index);
+    if (!subSpot) return;
+    this._pushMarkerHistory();
+    subSpot.lightPreset = value || "";
+    this._saveMarkers();
+    this._refresh3DZoneOverlay();
+    if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+  }
+
+  _updateSubSpotRenderParam(key, index, param, value, options = {}) {
+    const subSpot = this._subSpotAt(key, index);
+    if (!subSpot || !param) return;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return;
+    if (!options.skipHistory) this._pushMarkerHistory();
+    if (!subSpot.renderParams) subSpot.renderParams = {};
+    subSpot.renderParams[param] = parseFloat(number);
+    if (!options.skipSave) this._saveMarkers();
+    if (options.skipSave) this._refreshYamlExport();
+    this._refresh3DZoneOverlay();
+    if (!options.skipPanelRefresh && this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+  }
+
+  _resetSubSpotRenderParams(key, index) {
+    const subSpot = this._subSpotAt(key, index);
+    if (!subSpot) return;
+    this._pushMarkerHistory();
+    subSpot.renderParams = {};
+    subSpot.lightPreset = "";
+    this._saveMarkers();
+    this._refresh3DZoneOverlay();
+    if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+  }
+
+  _saveSubSpotRenderPreset(key, index) {
+    const marker = this._markers[key];
+    const subSpot = this._subSpotAt(key, index);
+    if (!marker || !subSpot) return;
+    const name = window.prompt("Preset name:");
+    if (!name?.trim()) return;
+    const safeName = name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+    if (!this._config.light_presets) this._config.light_presets = {};
+    this._config.light_presets[safeName] = this._cleanRenderPresetParams(this._resolveRenderParams(this._effectiveSubSpotMarker(marker, subSpot)));
+    subSpot.lightPreset = safeName;
+    this._savePresets();
+    this._saveMarkers();
+    this._refresh3DZoneOverlay();
+    if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+  }
+
+  _lightPathPointAt(key, index) {
+    const marker = this._markers[key];
+    if (!marker || !Number.isInteger(index) || index < 0) return null;
+    if (!Array.isArray(marker.lightPath)) marker.lightPath = [];
+    return marker.lightPath[index] || null;
+  }
+
+  _toggleLightPathDrawing(key) {
+    const marker = this._markers[key];
+    if (!marker || !this._supportsLightPath(marker.lightType)) return;
+    if (this._pendingLightPath?.key === key && this._pendingLightPath?.mode === "add") {
+      this._pendingLightPath = null;
+    } else {
+      this._pendingLightPath = { key, mode: "add", index: null };
+      this._pendingDeviceKey = null;
+      this._pendingSubSpot = null;
+    }
+    const status = this.shadowRoot?.querySelector("[data-model-status]");
+    if (status) {
+      status.hidden = false;
+      status.textContent = this._pendingLightPath ? "Click the 3D model to add LED path points." : "Light path drawing stopped.";
+    }
+    this._refreshSelectedMarkerPanel();
+  }
+
+  _clearLightPath(key) {
+    const marker = this._markers[key];
+    if (!marker?.lightPath?.length) return;
+    this._pushMarkerHistory();
+    marker.lightPath = [];
+    if (this._pendingLightPath?.key === key) this._pendingLightPath = null;
+    this._saveMarkers();
+    this._refresh3DMarkerOverlay();
+    this._refreshSelectedMarkerPanel();
+  }
+
+  _startLightPathPointMove(key, index) {
+    if (!this._lightPathPointAt(key, index)) return;
+    this._pendingLightPath = { key, index, mode: "move" };
+    this._pendingDeviceKey = null;
+    this._pendingSubSpot = null;
+    const status = this.shadowRoot?.querySelector("[data-model-status]");
+    if (status) {
+      status.hidden = false;
+      status.textContent = `Click the 3D model to move LED path point ${index + 1}. ${this._placementModeText()}`;
+    }
+  }
+
+  _deleteLightPathPoint(key, index) {
+    const marker = this._markers[key];
+    if (!marker?.lightPath?.[index]) return;
+    this._pushMarkerHistory();
+    marker.lightPath.splice(index, 1);
+    if (this._pendingLightPath?.key === key && this._pendingLightPath?.index === index) this._pendingLightPath = null;
+    this._saveMarkers();
+    this._refresh3DMarkerOverlay();
+    this._refreshSelectedMarkerPanel();
+  }
+
+  _updateLightPathCoordinate(key, index, axis, value, options = {}) {
+    const point = this._lightPathPointAt(key, index);
+    if (!point || !["x", "y", "z"].includes(axis)) return;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return;
+    if (!options.skipHistory) this._pushMarkerHistory();
+    const modelAxis = this._coordinateMap()[axis] || axis;
+    point[modelAxis] = Math.round(number);
+    if (!options.skipSave) this._saveMarkers();
+    if (options.skipSave) this._refreshYamlExport();
+    this._refresh3DMarkerOverlay();
+    if (!options.skipPanelRefresh) this._refreshSelectedMarkerPanel();
+  }
+
   _update3DMarkerButtons(markerButtons, THREE, camera, container) {
     if (!markerButtons?.length) return;
     const width = container.clientWidth || 1;
@@ -4483,9 +7383,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const displayPoint = this._modelToDisplayPoint(point);
     const modelPoint = this._zoneDisplayPointToModel(displayPoint);
     zone.points = [...(zone.points || []), {
-      x: Number(modelPoint.x.toFixed(4)),
-      y: Number(modelPoint.y.toFixed(4)),
-      z: Number(modelPoint.z.toFixed(4)),
+      x: Math.round(modelPoint.x),
+      y: Math.round(modelPoint.y),
+      z: Math.round(modelPoint.z),
     }];
     this._activeZoneId = zoneId;
     this._activeZonePointIndex = zone.points.length - 1;
@@ -4514,11 +7414,19 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       tapAction: existingMarker?.tapAction || "",
       holdAction: existingMarker?.holdAction || "",
       lightIntensity: this._normalizeLightIntensity(existingMarker?.lightIntensity),
-      x: Number(finalPoint.x.toFixed(4)),
-      y: Number(finalPoint.y.toFixed(4)),
-      z: Number(finalPoint.z.toFixed(4)),
+      lightType: this._normalizeLightType(existingMarker?.lightType),
+      lightRadius: this._normalizeLightRadius(existingMarker?.lightRadius),
+      lightPreset: existingMarker?.lightPreset || "",
+      renderParams: existingMarker?.renderParams || {},
+      subSpots: existingMarker?.subSpots || [],
+      lightPath: existingMarker?.lightPath || [],
+      x: Math.round(finalPoint.x),
+      y: Math.round(finalPoint.y),
+      z: Math.round(finalPoint.z),
     };
     this._pendingDeviceKey = null;
+    this._pendingSubSpot = null;
+    this._pendingLightPath = null;
     this._selectedMarkers.clear();
     this._selectedMarkers.add(key);
     this._saveMarkers();
@@ -4536,6 +7444,64 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     }
   }
 
+  _placeSubSpot(key, index, point, camera) {
+    const subSpot = this._subSpotAt(key, index);
+    if (!subSpot) return;
+    const finalPoint = this._constrained3DPointForExisting(subSpot, point, camera);
+    this._pushMarkerHistory();
+    subSpot.x = Math.round(finalPoint.x);
+    subSpot.y = Math.round(finalPoint.y);
+    subSpot.z = Math.round(finalPoint.z);
+    this._pendingSubSpot = null;
+    this._saveMarkers();
+    this._refresh3DMarkerOverlay();
+    this._refreshSelectedMarkerPanel();
+    const status = this.shadowRoot?.querySelector("[data-model-status]");
+    if (status) {
+      status.hidden = false;
+      status.textContent = `Sub-spot ${index + 1} saved.`;
+      window.setTimeout(() => {
+        if (this._mode === "edit" && status.textContent === `Sub-spot ${index + 1} saved.`) {
+          status.textContent = "Select an entity, then click the 3D model to place it.";
+        }
+      }, 1400);
+    }
+  }
+
+  _placeLightPathPoint(key, index, point, camera) {
+    const marker = this._markers[key];
+    if (!marker || !this._supportsLightPath(marker.lightType)) return;
+    if (!Array.isArray(marker.lightPath)) marker.lightPath = [];
+    const existing = Number.isInteger(index) ? marker.lightPath[index] : null;
+    const finalPoint = existing ? this._constrained3DPointForExisting(existing, point, camera) : point;
+    this._pushMarkerHistory();
+    const nextPoint = {
+      x: Math.round(finalPoint.x),
+      y: Math.round(finalPoint.y),
+      z: Math.round(finalPoint.z),
+    };
+    if (!this._isSafeModelPoint(nextPoint)) {
+      this._pendingLightPath = null;
+      this._showModelStatus("Ignored unsafe LED path point.");
+      return;
+    }
+    if (existing) {
+      marker.lightPath[index] = nextPoint;
+      this._pendingLightPath = null;
+    } else {
+      marker.lightPath.push(nextPoint);
+      this._pendingLightPath = { key, mode: "add", index: null };
+    }
+    this._saveMarkers();
+    this._refresh3DMarkerOverlay();
+    this._refreshSelectedMarkerPanel();
+    const status = this.shadowRoot?.querySelector("[data-model-status]");
+    if (status) {
+      status.hidden = false;
+      status.textContent = existing ? `LED path point ${index + 1} saved.` : `LED path point ${marker.lightPath.length} added.`;
+    }
+  }
+
   _fitCameraToObject(THREE, camera, controls, object) {
     const box = new THREE.Box3().setFromObject(object);
     const size = box.getSize(new THREE.Vector3());
@@ -4543,8 +7509,20 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const distance = maxDim / (2 * Math.tan((camera.fov * Math.PI) / 360));
 
+    // Position camera at an angled view that respects the model's vertical axis.
+    const vAxis = this._coordinateMap()[this._verticalAxis()]; // "x"|"y"|"z"
+    const offset = new THREE.Vector3(
+      vAxis === "x" ? distance * 1.25 : distance * 0.85,
+      vAxis === "y" ? distance * 1.25 : distance * 0.85,
+      vAxis === "z" ? distance * 1.25 : distance * 0.85,
+    );
+    // Also tilt toward one floor axis so it's a natural isometric view
+    if (vAxis === "z") { offset.x += distance * 0.6; offset.y -= distance * 0.6; }
+    else if (vAxis === "y") { offset.x += distance * 0.6; offset.z += distance * 0.6; }
+    else { offset.y += distance * 0.6; offset.z += distance * 0.6; }
+
     controls.target.copy(center);
-    camera.position.set(center.x + distance * 0.85, center.y + distance * 0.75, center.z + distance * 1.25);
+    camera.position.copy(center).add(offset);
     camera.near = Math.max(0.01, distance / 100);
     camera.far = Math.max(1000, distance * 100);
     camera.lookAt(center);
@@ -4554,6 +7532,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _disposeModelViewer({ preserveCamera = false } = {}) {
     this._modelRenderToken += 1;
+    this._modelKeyboardNavigationActive = false;
     if (!this._modelViewer) return;
     const { scene, renderer, controls, resizeObserver, animationFrame, dispose } = this._modelViewer;
     if (!preserveCamera) this._captureModelCameraState();
@@ -4682,6 +7661,48 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           gap: 8px;
         }
 
+        .filters-toggle {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          min-height: 36px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 8px;
+          background: var(--secondary-background-color, #f7f8fa);
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font: inherit;
+          font-size: 13px;
+          font-weight: 800;
+          padding: 0 10px;
+        }
+
+        .filters-toggle::after {
+          content: "";
+          width: 8px;
+          height: 8px;
+          border-right: 2px solid currentColor;
+          border-bottom: 2px solid currentColor;
+          transform: rotate(45deg);
+          transition: transform 0.16s ease;
+        }
+
+        .filters-toggle[aria-expanded="true"]::after {
+          transform: rotate(225deg);
+        }
+
+        .filters-toggle span:last-child {
+          color: var(--dmp-muted);
+          font-size: 11px;
+          margin-left: auto;
+        }
+
+        .filters-options {
+          display: grid;
+          gap: 8px;
+        }
+
         .sidebar-tab-panel {
           min-height: 0;
           overflow: hidden;
@@ -4769,6 +7790,20 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
         .zone-illuminance-entity {
           grid-column: 1 / -1;
+        }
+        .zone-illuminance-entity input {
+          width: 100%;
+          min-height: 30px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 6px;
+          background: var(--secondary-background-color, #f7f8fa);
+          color: var(--primary-text-color);
+          font-size: 11px;
+          padding: 0 8px;
+          box-sizing: border-box;
+        }
+        .zone-illuminance-entity input:disabled {
+          opacity: 0.45;
         }
 
         .zone-illuminance-toggle {
@@ -4889,9 +7924,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         }
 
         .device-row.is-placed {
-          grid-template-rows: auto auto;
-          row-gap: 8px;
-          min-height: 84px;
+          min-height: 48px;
         }
 
         .placement-mode {
@@ -5121,11 +8154,422 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           font-weight: 800;
         }
 
+        /* ── Render params section ── */
+        .render-params-section {
+          grid-column: 1 / 4;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          padding: 8px;
+          background: var(--secondary-background-color, #f7f8fa);
+          border: 1px solid var(--dmp-border);
+          border-radius: 8px;
+        }
+        .render-params-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+        .render-params-header > span {
+          color: var(--dmp-muted);
+          font-size: 10px;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .render-preset-label {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 10px;
+          color: var(--dmp-muted);
+          font-weight: 600;
+        }
+        .render-preset-label select {
+          font-size: 10px;
+          padding: 2px 4px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 5px;
+          background: var(--card-background-color, #fff);
+          color: var(--primary-text-color);
+        }
+        .render-params-grid {
+          display: grid;
+          gap: 8px;
+        }
+        .render-params-grid.advanced {
+          padding-top: 6px;
+          border-top: 1px solid var(--dmp-border);
+        }
+        .render-param-group {
+          display: grid;
+          gap: 5px;
+        }
+        .render-param-group-title {
+          color: var(--dmp-muted);
+          font-size: 10px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .render-param-group-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 10px 12px;
+        }
+        .render-advanced-toggle {
+          align-self: flex-start;
+          font-size: 10px;
+          font-weight: 700;
+          padding: 3px 8px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 5px;
+          background: var(--card-background-color, #fff);
+          color: var(--dmp-muted);
+          cursor: pointer;
+        }
+        .render-advanced-toggle:hover,
+        .render-advanced-toggle[aria-expanded="true"] {
+          color: var(--primary-color, #03a9f4);
+          border-color: var(--primary-color, #03a9f4);
+        }
+        .rp-slider {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+          align-items: stretch;
+          gap: 4px;
+          min-width: 0;
+          font-size: 11px;
+        }
+        .rp-slider span {
+          color: var(--dmp-muted);
+          font-weight: 700;
+          line-height: 1.25;
+          white-space: normal;
+          overflow: visible;
+          text-overflow: clip;
+        }
+        .rp-stepper {
+          display: grid;
+          grid-template-columns: 28px minmax(64px, 1fr) 28px;
+          align-items: center;
+          gap: 4px;
+          width: 100%;
+        }
+        .rp-stepper button {
+          width: 28px;
+          height: 28px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 5px;
+          background: var(--card-background-color, #fff);
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font-size: 13px;
+          font-weight: 900;
+          line-height: 1;
+          padding: 0;
+        }
+        .rp-stepper button:hover {
+          border-color: var(--dmp-border);
+          color: var(--primary-text-color);
+          background: var(--secondary-background-color, #f7f8fa);
+        }
+        .rp-slider:hover .rp-stepper input[type=number] {
+          border-color: var(--primary-color, #f8d66d);
+          box-shadow: 0 0 0 1px var(--primary-color, #f8d66d);
+        }
+
+        /* Parameter tooltip */
+        .rp-slider[data-rp-tooltip] {
+          position: relative;
+        }
+        .rp-slider[data-rp-tooltip]:hover::after {
+          content: attr(data-rp-tooltip);
+          position: absolute;
+          bottom: calc(100% + 6px);
+          left: 0;
+          right: 0;
+          background: #1a1a2e;
+          color: #e8e8f0;
+          font-size: 10px;
+          line-height: 1.4;
+          padding: 6px 8px;
+          border-radius: 6px;
+          border: 1px solid rgba(255,255,255,0.12);
+          white-space: pre-wrap;
+          word-break: break-word;
+          z-index: 99;
+          pointer-events: none;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }
+        .rp-stepper input[type=number] {
+          width: 100%;
+          min-width: 0;
+          height: 28px;
+          box-sizing: border-box;
+          border: 1px solid var(--dmp-border);
+          border-radius: 5px;
+          background: var(--card-background-color, #fff);
+          color: var(--primary-text-color);
+          font-family: monospace;
+          font-size: 11px;
+          padding: 0 4px;
+          text-align: center;
+          transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .rp-slider.rp-overridden span {
+          color: var(--primary-color, #f8d66d);
+        }
+        .render-params-actions {
+          display: flex;
+          gap: 6px;
+          justify-content: flex-end;
+        }
+        .render-params-actions button {
+          font-size: 10px;
+          padding: 3px 8px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 5px;
+          background: var(--card-background-color, #fff);
+          color: var(--primary-text-color);
+          cursor: pointer;
+        }
+        .render-params-actions button:hover {
+          background: var(--primary-color, #f8d66d);
+        }
+
+        .sub-spots-section {
+          grid-column: 1 / 4;
+          display: grid;
+          gap: 8px;
+          padding: 8px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 8px;
+          background: var(--secondary-background-color, #f7f8fa);
+        }
+        .sub-spots-header,
+        .light-path-header {
+          display: grid;
+          align-items: center;
+          gap: 8px;
+          grid-template-columns: minmax(0, 1fr) auto;
+        }
+        .sub-spots-header span {
+          color: var(--dmp-muted);
+          font-size: 10px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .sub-spots-header button,
+        .sub-spot-title button {
+          border: 1px solid var(--dmp-border);
+          border-radius: 999px;
+          background: transparent;
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font-size: 11px;
+          font-weight: 800;
+          padding: 3px 8px;
+          flex: 0 0 auto;
+          max-width: 100%;
+        }
+        .sub-spots-header button {
+          color: #22c55e;
+          border-color: rgba(34, 197, 94, 0.65);
+          background: rgba(34, 197, 94, 0.10);
+        }
+        .sub-spot-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 8px;
+          padding: 8px;
+          border: 1px solid rgba(255,255,255,0.12);
+          border-radius: 8px;
+          background: rgba(0,0,0,0.08);
+          overflow: hidden;
+        }
+        .sub-spot-title {
+          display: grid;
+          align-items: center;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 6px;
+        }
+        .sub-spot-title strong {
+          min-width: 0;
+          font-size: 12px;
+        }
+        .sub-spot-title > div {
+          display: flex;
+          gap: 6px;
+          justify-content: flex-end;
+          flex-wrap: nowrap;
+          min-width: 0;
+          max-width: 100%;
+        }
+        .sub-spot-title button.move,
+        .light-path-actions button.move {
+          color: #facc15;
+          border-color: rgba(250, 204, 21, 0.72);
+          background: rgba(250, 204, 21, 0.12);
+        }
+        .sub-spot-title button.move:hover,
+        .light-path-actions button.move:hover {
+          color: #fde68a;
+          border-color: #facc15;
+          background: rgba(250, 204, 21, 0.22);
+        }
+        .sub-spot-title button.remove,
+        .light-path-actions button.remove {
+          color: #fca5a5;
+          border-color: rgba(239, 68, 68, 0.68);
+          background: rgba(239, 68, 68, 0.12);
+        }
+        .sub-spot-title button.remove:hover,
+        .light-path-actions button.remove:hover {
+          color: #fecaca;
+          border-color: #ef4444;
+          background: rgba(239, 68, 68, 0.24);
+        }
+        .sub-spot-preset {
+          justify-content: flex-start;
+        }
+        .sub-spots-empty {
+          color: var(--dmp-muted);
+          font-size: 11px;
+        }
+
+        .light-path-section {
+          grid-column: 1 / 4;
+          display: grid;
+          gap: 8px;
+          padding: 8px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 8px;
+          background: var(--secondary-background-color, #f7f8fa);
+        }
+        .light-path-header span {
+          color: var(--dmp-muted);
+          font-size: 10px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .light-path-header > div,
+        .light-path-actions {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          min-width: 0;
+          max-width: 100%;
+        }
+        .light-path-header button,
+        .light-path-actions button {
+          border: 1px solid var(--dmp-border);
+          border-radius: 999px;
+          background: transparent;
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font-size: 11px;
+          font-weight: 800;
+          padding: 3px 8px;
+          flex: 0 0 auto;
+          max-width: 100%;
+        }
+        .light-path-header button:first-child {
+          color: #facc15;
+          border-color: rgba(250, 204, 21, 0.7);
+          background: rgba(250, 204, 21, 0.12);
+        }
+        .light-path-point-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 8px;
+          padding: 8px;
+          border: 1px solid rgba(255,255,255,0.12);
+          border-radius: 8px;
+          background: rgba(0,0,0,0.08);
+          overflow: hidden;
+        }
+        .light-path-coordinates {
+          grid-column: 1 / -1;
+        }
+        .light-path-empty {
+          color: var(--dmp-muted);
+          font-size: 11px;
+        }
+
+        .light-shape-toggle {
+          display: flex;
+          gap: 3px;
+        }
+        .light-shape-toggle button {
+          font-size: 11px;
+          padding: 3px 9px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 999px;
+          background: transparent;
+          color: var(--dmp-muted);
+          cursor: pointer;
+        }
+        .light-shape-toggle button.active {
+          background: var(--primary-color, #f8d66d);
+          color: #000;
+          border-color: var(--primary-color, #f8d66d);
+        }
+
+        .light-path-actions-bar {
+          display: flex;
+          gap: 6px;
+          margin-bottom: 6px;
+        }
+
+        .light-rect-editor {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr;
+          gap: 6px;
+          margin-top: 6px;
+        }
+        .light-rect-field {
+          display: grid;
+          gap: 3px;
+        }
+        .light-rect-field span {
+          font-size: 10px;
+          font-weight: 700;
+          color: var(--dmp-muted);
+        }
+        .light-rect-field input {
+          min-width: 0;
+          min-height: 28px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 6px;
+          background: var(--secondary-background-color, #f7f8fa);
+          color: var(--primary-text-color);
+          font: 11px/1.2 monospace;
+          padding: 0 6px;
+        }
+        .light-rect-hint {
+          grid-column: 1 / -1;
+          color: var(--dmp-muted);
+          font-size: 10px;
+        }
+
         .coordinate-editor {
           grid-column: 1 / 4;
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 6px;
+        }
+
+        .sub-spot-coordinates,
+        .light-path-coordinates {
+          grid-column: 1 / -1;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
         }
 
         .coordinate-editor label {
@@ -5139,6 +8583,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           font-size: 10px;
           font-weight: 800;
         }
+        .coordinate-editor .axis-label,
+        .zone-coordinate-editor .axis-label {
+          font-weight: 900;
+        }
 
         .coordinate-editor input {
           min-width: 0;
@@ -5151,13 +8599,20 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           padding: 0 6px;
         }
 
-        .placed, .remove, .edit-marker {
+        .sub-spot-coordinates input,
+        .light-path-coordinates input {
+          width: 100%;
+          min-width: 0;
+          font-size: 12px;
+        }
+
+        .placed, .remove, .edit-marker, .select-marker {
           border: 1px solid var(--dmp-border);
           border-radius: 999px;
           padding: 3px 7px;
         }
 
-        .remove, .edit-marker {
+        .remove, .edit-marker, .select-marker {
           background: transparent;
           color: var(--dmp-muted);
           cursor: pointer;
@@ -5165,9 +8620,33 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           font-size: 12px;
         }
 
+        .select-marker {
+          color: #22c55e;
+          border-color: rgba(34, 197, 94, 0.65);
+          background: rgba(34, 197, 94, 0.10);
+        }
+
+        .select-marker:hover {
+          color: #86efac;
+          border-color: #22c55e;
+          background: rgba(34, 197, 94, 0.18);
+        }
+
+        .is-pending .select-marker {
+          color: var(--primary-color, #f8d66d);
+          border-color: var(--primary-color, #f8d66d);
+        }
+
+        .remove {
+          color: #ef4444;
+          border-color: rgba(239, 68, 68, 0.65);
+          background: rgba(239, 68, 68, 0.10);
+        }
+
         .remove:hover {
-          color: var(--dmp-bad);
-          border-color: var(--dmp-bad);
+          color: #fca5a5;
+          border-color: #ef4444;
+          background: rgba(239, 68, 68, 0.18);
         }
 
         .edit-marker:hover {
@@ -5485,7 +8964,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           -webkit-user-select: none;
         }
 
-        .model-viewer canvas {
+        .model-viewer canvas:not(.axes-gizmo) {
           display: block;
           width: 100%;
           height: 100%;
@@ -5741,6 +9220,32 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           box-shadow: 0 0 0 3px rgba(212, 54, 54, 0.98), 0 0 18px rgba(212, 54, 54, 0.95);
         }
 
+        .model-sub-spot {
+          background: rgba(248, 214, 109, 0.95);
+          color: #111827;
+          box-shadow: 0 0 0 2px rgba(248, 214, 109, 0.24), 0 6px 18px rgba(0, 0, 0, 0.28);
+        }
+
+        .model-sub-spot span {
+          background: #f8d66d;
+          color: #111827;
+          box-shadow: none;
+        }
+
+        .model-light-path-point {
+          background: rgba(14, 165, 233, 0.92);
+          color: #fff;
+          box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.24), 0 6px 18px rgba(0, 0, 0, 0.28);
+        }
+
+        .model-light-path-point span {
+          background: #0ea5e9;
+          color: #fff;
+          box-shadow: none;
+          font-size: 10px;
+          font-weight: 900;
+        }
+
         .model-marker.jump-focus {
           overflow: visible;
         }
@@ -5813,6 +9318,50 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           display: none;
         }
 
+        .version-badge {
+          position: absolute;
+          bottom: 6px;
+          right: 8px;
+          z-index: 10;
+          font-size: 10px;
+          font-weight: 600;
+          color: rgba(255, 255, 255, 0.35);
+          pointer-events: none;
+          letter-spacing: 0.03em;
+        }
+
+        /* ── Axes gizmo (edit mode only) ── */
+        .axes-gizmo {
+          position: absolute;
+          top: 10px;
+          left: 10px;
+          width: 130px;
+          height: 130px;
+          pointer-events: none;
+          z-index: 6;
+          border-radius: 8px;
+          background: rgba(0, 0, 0, 0.28);
+        }
+        .axes-legend {
+          position: absolute;
+          top: 146px;
+          left: 10px;
+          width: 130px;
+          display: flex;
+          justify-content: space-around;
+          align-items: center;
+          pointer-events: none;
+          z-index: 6;
+          font-size: 12px;
+          font-family: monospace;
+          letter-spacing: 0.02em;
+          background: rgba(0, 0, 0, 0.28);
+          border-radius: 6px;
+          padding: 3px 4px;
+          box-sizing: border-box;
+          text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+        }
+
         .selected-marker-panel {
           position: absolute;
           z-index: 4;
@@ -5852,6 +9401,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           font-size: 13px;
         }
 
+        .selected-title-actions {
+          display: flex;
+          gap: 6px;
+          flex-shrink: 0;
+        }
+
         .selected-title button {
           border: 1px solid rgba(255, 255, 255, 0.28);
           border-radius: 999px;
@@ -5861,6 +9416,25 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           font: inherit;
           font-size: 12px;
           padding: 4px 9px;
+        }
+
+        .selected-title button[data-edit-marker] {
+          border-color: rgba(248, 214, 109, 0.65);
+          background: rgba(248, 214, 109, 0.14);
+          color: #fde68a;
+        }
+
+        .selected-title button[data-edit-marker]:hover {
+          background: rgba(248, 214, 109, 0.28);
+        }
+
+        .selected-title button.remove {
+          border-color: rgba(239, 68, 68, 0.5);
+          background: rgba(239, 68, 68, 0.12);
+          color: #fca5a5;
+        }
+        .selected-title button.remove:hover {
+          background: rgba(239, 68, 68, 0.30);
         }
 
         .selected-marker-panel .coordinate-editor {
@@ -6288,6 +9862,21 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           padding: 5px 9px;
         }
 
+        .rp-import-label {
+          border: 1px solid var(--dmp-border);
+          border-radius: 5px;
+          background: var(--card-background-color, #fff);
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font: inherit;
+          font-size: 10px;
+          padding: 3px 8px;
+        }
+        .rp-import-label:hover {
+          background: var(--primary-color, #f8d66d);
+        }
+
+
         .export-actions button:hover {
           border-color: var(--primary-color, #03a9f4);
           color: var(--primary-color, #03a9f4);
@@ -6502,16 +10091,6 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
             ${this._listInput("areas", "Areas", [])}
           </div>
           <div class="editor-help">Comma-separated values. Leave empty to include all.</div>
-        </section>
-
-        <section>
-          <h3>Coordinates</h3>
-          <div class="editor-grid">
-            ${this._axisSelect("coordinate_map.x", "Display X Uses Model Axis", "z")}
-            ${this._axisSelect("coordinate_map.y", "Display Y Uses Model Axis", "x")}
-            ${this._axisSelect("coordinate_map.z", "Display Z Uses Model Axis", "y")}
-            ${this._axisSelect("vertical_axis", "Vertical Axis", "z")}
-          </div>
         </section>
 
         <section>

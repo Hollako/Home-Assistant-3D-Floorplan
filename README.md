@@ -100,6 +100,8 @@ Switch to Edit Mode to place and configure markers.
 - XYZ coordinates
 - Move / Delete buttons
 
+![Marker settings panel](images/Marker%20Settings.png)
+
 **Axes gizmo** - a small XYZ orientation indicator appears in the top-left corner in Edit Mode, showing how the model axes relate to the camera.
 
 **Export YAML** - the sidebar exports the full card YAML with current marker positions, zone definitions, and presets. Press **Copy YAML** to copy it to the clipboard.
@@ -130,7 +132,11 @@ Each zone has two modes, selectable in the zone settings:
 
 **Area (zone-wide glow)** - a single flat ambient fill covers the whole floor polygon. Suitable for zones with diffuse overhead lighting or when no individual light positions are needed.
 
+![Area glow mode](images/Area_Glow.png)
+
 **Positional (per-light pools)** - each `light.*` marker placed inside the zone creates its own floor pool, wall glow, ceiling glow, and GI bounce based on its position and light type.
+
+![Positional lighting mode](images/Positional.png)
 
 ### Zone Settings
 

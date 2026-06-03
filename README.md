@@ -100,7 +100,7 @@ Switch to Edit Mode to place and configure markers.
 - XYZ coordinates
 - Move / Delete buttons
 
-![Marker settings panel](images/Marker%20Settings.png)
+<img src="images/Marker%20Settings.png" alt="Marker settings panel" width="350" />
 
 **Axes gizmo** - a small XYZ orientation indicator appears in the top-left corner in Edit Mode, showing how the model axes relate to the camera.
 

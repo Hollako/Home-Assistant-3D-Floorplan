@@ -285,9 +285,42 @@ floors:
     brightness_zones: []
 ```
 
-## Three.js URLs
+## Offline / Three.js Setup
 
-The card loads Three.js modules dynamically. Some mobile WebViews, including the Home Assistant Companion App on iPadOS, can block remote module imports. If the model loads on desktop but not in the Companion App, host these files locally:
+### What is and isn't local by default
+
+When you install via HACS or manually, the card file (`Home-Assistant-3D-Floorplan.js`) is stored locally on your Home Assistant instance. Your `.glb` model is also served from your local `/www/` folder.
+
+However, **Three.js (the 3D engine) is not bundled by default**. The card fetches it from the external CDN `esm.sh` on first load:
+
+```yaml
+three_url: "https://esm.sh/three@0.165.0"   # default - requires internet
+```
+
+This means an internet connection is required on every page load unless you take the extra step below.
+
+### Making it fully offline (recommended)
+
+The repository includes a pre-built bundle at `dist/three.bundle.min.js`. Copy it to your Home Assistant `www` folder:
+
+```
+/config/www/three.bundle.min.js
+```
+
+Then point the card at it:
+
+```yaml
+type: custom:home-assistant-3d-floorplan
+title: 3D Floorplan
+model: /local/floorplans/home.glb
+three_bundle_url: /local/three.bundle.min.js
+```
+
+With this in place, **everything runs 100% offline** - no external requests, no CDN dependency. This also fixes loading issues in the Home Assistant Companion App on iOS/Android, which can block remote module imports.
+
+### Alternative - host individual Three.js files
+
+If you prefer to host the individual modules rather than the bundle:
 
 ```yaml
 three_url: /local/vendor/three/three.module.js

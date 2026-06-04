@@ -1,4 +1,4 @@
-﻿const VERSION = "2.9.0";
+﻿const VERSION = "2.9.8";
 class HomeAssistant3DFloorplan extends HTMLElement {
   static getConfigElement() {
     return document.createElement("home-assistant-3d-floorplan-editor");
@@ -126,7 +126,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       },
       three_url: "https://esm.sh/three@0.165.0",
       three_bundle_url: "/local/three.bundle.min.js",
-      model_antialias: true,
+      model_performance_profile: "quality",
+      model_antialias: null,
       model_pixel_ratio: 0,
       gltf_loader_url: "https://esm.sh/three@0.165.0/examples/jsm/loaders/GLTFLoader.js",
       obj_loader_url: "https://esm.sh/three@0.165.0/examples/jsm/loaders/OBJLoader.js",
@@ -859,7 +860,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         illuminanceEntity: zone.illuminance_entity || zone.illuminanceEntity || zone.illuminance?.entity || "",
         showLux: zone.show_lux === true || zone.showLux === true || zone.illuminance?.show_lux === true,
         lightingMode: zone.lighting_mode || zone.lightingMode || "area",
-        points: (zone.points || []).map((point) => this._zoneDisplayPointToModel(point)),
+        points: (zone.points || []).map((point) => this._zoneDisplayPointToModel(point)).filter((point) => this._isSafeModelPoint(point)),
       };
       return zones;
     }, {});
@@ -1116,8 +1117,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (Number.isFinite(direct)) return Number(direct.toFixed(4));
     const firstPoint = (zone.points || [])[0];
     if (firstPoint) {
-      const displayPoint = "z" in firstPoint ? firstPoint : this._modelToDisplayPoint(firstPoint);
-      const height = Number(displayPoint.z);
+      const displayPoint = ["x", "y", "z"].every((axis) => Number.isFinite(Number(firstPoint?.[axis]))) ? firstPoint : this._modelToDisplayPoint(firstPoint);
+      const height = Number(displayPoint[this._verticalAxis()]);
       if (Number.isFinite(height)) return Number(height.toFixed(4));
     }
     return 0;
@@ -1139,7 +1140,17 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _zoneDisplayPointToModel(point) {
     // Keep all floor-plane axes; zero out only the vertical axis so zone points
     // stay on the floor regardless of where the user clicked in 3D space.
-    const displayPoint = { x: Number(point?.x), y: Number(point?.y), z: Number(point?.z) };
+    const displayPoint = { x: 0, y: 0, z: 0 };
+    const floorAxes = this._floorAxes();
+    const hasFullDisplayPoint = ["x", "y", "z"].every((axis) => Number.isFinite(Number(point?.[axis])));
+    if (hasFullDisplayPoint) {
+      displayPoint.x = Number(point?.x);
+      displayPoint.y = Number(point?.y);
+      displayPoint.z = Number(point?.z);
+    } else {
+      displayPoint[floorAxes[0]] = Number(point?.x);
+      displayPoint[floorAxes[1]] = Number(point?.[floorAxes[1]] ?? point?.y);
+    }
     displayPoint[this._verticalAxis()] = 0;
     return this._displayToModelPoint(displayPoint);
   }
@@ -4534,10 +4545,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _yamlExport(rows) {
     const rowByKey = new Map(rows.map((row) => [row.key, row]));
+    const performanceLines = this._yamlPerformanceSettings();
     const ambientLines = this._yamlAmbientDarkness();
     const defaultViewLines = this._yamlDefaultView(this._modelDefaultViews?.[this._activeFloorId || "default"], "");
     if (this._hasMultipleFloors()) {
       return [
+        ...performanceLines,
         ...ambientLines,
         "floors:",
         ...this._floors.flatMap((floor) => {
@@ -4618,10 +4631,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     ...(zone.illuminanceEnabled ? [`        illuminance_enabled: true`, ...(zone.illuminanceEntity ? [`        illuminance_entity: ${zone.illuminanceEntity}`] : [])] : []),
                     ...(zone.showLux ? [`        show_lux: true`] : []),
                     "        points:",
-                    ...zone.points.flatMap((point) => [
-                      `          - x: ${point.x}`,
-                      `            y: ${point.y}`,
-                    ]),
+                    ...zone.points.flatMap((point) => this._yamlZonePointLines(point, "          ")),
                   ]),
                 ]
               : []),
@@ -4636,6 +4646,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (!markers.length && !zones.length && !defaultViewLines.length) return "markers: []";
 
     return [
+      ...performanceLines,
       ...defaultViewLines,
       ...(markers.length
         ? [
@@ -4699,14 +4710,17 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               ...(zone.illuminanceEnabled ? [`    illuminance_enabled: true`, ...(zone.illuminanceEntity ? [`    illuminance_entity: ${zone.illuminanceEntity}`] : [])] : []),
               ...(zone.showLux ? [`    show_lux: true`] : []),
               "    points:",
-              ...zone.points.flatMap((point) => [
-                `      - x: ${point.x}`,
-                `        y: ${point.y}`,
-              ]),
+              ...zone.points.flatMap((point) => this._yamlZonePointLines(point, "      ")),
             ]),
           ]
         : []),
     ].join("\n");
+  }
+
+  _yamlZonePointLines(point, indent) {
+    const entries = Object.entries(point);
+    if (!entries.length) return [];
+    return entries.map(([axis, value], index) => `${indent}${index === 0 ? "- " : "  "}${axis}: ${value}`);
   }
 
   _yamlDefaultView(view, indent = "") {
@@ -4741,6 +4755,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           lightRadius: this._normalizeLightRadius(marker.lightRadius),
           lightPreset: marker.lightPreset || "",
           renderParams: marker.renderParams && Object.keys(marker.renderParams).length ? marker.renderParams : null,
+          lightShape: marker.lightShape || marker.light_shape || "path",
+          lightRect: marker.lightRect || marker.light_rect || null,
           subSpots: (marker.subSpots || []).map((spot, index) => {
             const spotPoint = this._modelToDisplayPoint(spot);
             return {
@@ -4782,6 +4798,18 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     ];
   }
 
+  _yamlPerformanceSettings() {
+    const lines = [];
+    const profile = this._modelPerformanceProfile();
+    const pixelRatio = Number(this._config.model_pixel_ratio);
+    if (profile !== "quality") lines.push(`model_performance_profile: ${profile}`);
+    if (Number.isFinite(pixelRatio) && pixelRatio > 0) lines.push(`model_pixel_ratio: ${pixelRatio}`);
+    if (this._config.model_antialias !== null && this._config.model_antialias !== undefined) {
+      lines.push(`model_antialias: ${this._config.model_antialias !== false ? "true" : "false"}`);
+    }
+    return lines;
+  }
+
   _yamlAmbientDarkness() {
     if (this._config.ambient_darkness === false) return ["ambient_darkness: false"];
     const ambient = this._ambientDarknessConfig();
@@ -4795,6 +4823,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _yamlZonesForFloor(floorId) {
     const floorZones = floorId === this._activeFloorId ? this._zones : this._floorZones[floorId] || {};
+    const floorAxes = this._floorAxes();
     return Object.values(floorZones)
       .map((zone) => ({
         id: zone.id,
@@ -4810,8 +4839,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         points: (zone.points || []).map((point) => {
           const displayPoint = this._modelToDisplayPoint(point);
           return {
-            x: this._formatCoordinateInteger(displayPoint.x),
-            y: this._formatCoordinateInteger(displayPoint.y),
+            [floorAxes[0]]: this._formatCoordinateInteger(displayPoint[floorAxes[0]]),
+            [floorAxes[1]]: this._formatCoordinateInteger(displayPoint[floorAxes[1]]),
           };
         }),
       }))
@@ -4877,6 +4906,35 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return this._threeModulesPromise;
   }
 
+  _modelPerformanceProfile() {
+    const value = String(this._config.model_performance_profile || this._config.performance_profile || "quality").toLowerCase();
+    return ["quality", "balanced", "performance", "mobile"].includes(value) ? value : "quality";
+  }
+
+  _modelAntialias(profile = this._modelPerformanceProfile()) {
+    if (this._config.model_antialias !== null && this._config.model_antialias !== undefined) {
+      return this._config.model_antialias !== false;
+    }
+    return profile === "quality";
+  }
+
+  _modelPixelRatio(profile = this._modelPerformanceProfile()) {
+    const configuredPixelRatio = Number(this._config.model_pixel_ratio);
+    if (Number.isFinite(configuredPixelRatio) && configuredPixelRatio > 0) {
+      return Math.max(0.5, Math.min(configuredPixelRatio, 3));
+    }
+    const deviceRatio = window.devicePixelRatio || 1;
+    if (profile === "quality") return Math.min(deviceRatio, 2);
+    if (profile === "balanced") return Math.min(deviceRatio, 1.5);
+    return 1;
+  }
+
+  _modelOverlayFrameInterval(profile = this._modelPerformanceProfile()) {
+    if (profile === "quality") return 0;
+    if (profile === "balanced") return 24;
+    return 40;
+  }
+
   async _renderModelViewer(modelUrl) {
     const container = this.shadowRoot?.querySelector("[data-model-viewer]");
     const status = this.shadowRoot?.querySelector("[data-model-status]");
@@ -4896,11 +4954,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       scene.background = new THREE.Color(String(background).trim() || "#111827");
 
       const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 10000);
-      const antialias = this._config.model_antialias !== false;
-      const configuredPixelRatio = Number(this._config.model_pixel_ratio);
-      const pixelRatio = Number.isFinite(configuredPixelRatio) && configuredPixelRatio > 0
-        ? Math.min(configuredPixelRatio, 3)
-        : Math.min(window.devicePixelRatio || 1, 2);
+      const profile = this._modelPerformanceProfile();
+      const antialias = this._modelAntialias(profile);
+      const pixelRatio = this._modelPixelRatio(profile);
       const renderer = new THREE.WebGLRenderer({ antialias, alpha: false });
       renderer.setPixelRatio(pixelRatio);
       if ("outputColorSpace" in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -5052,6 +5108,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       };
       let disposed = false;
       let needsRender = true;
+      let lastOverlayUpdate = 0;
+      const overlayFrameInterval = this._modelOverlayFrameInterval(profile);
 
       // Trigger a render whenever the camera moves (including damping deceleration).
       controls.addEventListener("change", () => { needsRender = true; });
@@ -5079,9 +5137,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         if (!needsRender) return;
         needsRender = false;
         this._captureModelCameraState();
-        this._update3DMarkerButtons(this._modelViewer?.markerButtons || markerButtons, THREE, camera, container);
-        this._update3DZoneLabels(this._modelViewer?.zoneLabels || [], THREE, camera, container);
-        this._update3DZonePointButtons(this._modelViewer?.zonePointButtons, THREE, camera, container);
+        const now = performance.now();
+        const shouldUpdateOverlay = !lastOverlayUpdate || !overlayFrameInterval || now - lastOverlayUpdate >= overlayFrameInterval;
+        if (shouldUpdateOverlay) {
+          lastOverlayUpdate = now;
+          this._update3DMarkerButtons(this._modelViewer?.markerButtons || markerButtons, THREE, camera, container);
+          this._update3DZoneLabels(this._modelViewer?.zoneLabels || [], THREE, camera, container);
+          this._update3DZonePointButtons(this._modelViewer?.zonePointButtons, THREE, camera, container);
+        }
         renderer.render(scene, camera);
         // Draw axes gizmo on 2D canvas — project world-space axes onto camera plane
         if (gizmoCtx && gizmoCanvas) {
@@ -5092,28 +5155,33 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           // Camera right and up vectors (world space) — project each axis onto them
           const camRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
           const camUp    = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+          const displayForward = this._modelToDisplayPoint(camera.getWorldDirection(new THREE.Vector3()));
+          const isTopView = Math.abs(Number(displayForward[this._verticalAxis()])) > 0.92;
+          const floorModelAxes = new Set(this._floorAxes().map((axis) => this._coordinateMap()[axis] || axis));
           const gizmoAxes = [
-            { dir: new THREE.Vector3(1, 0, 0), color: "#ff4444", label: "X" },
-            { dir: new THREE.Vector3(0, 1, 0), color: "#44ee44", label: "Y" },
-            { dir: new THREE.Vector3(0, 0, 1), color: "#3388ff", label: "Z" },
+            { dir: new THREE.Vector3(1, 0, 0), color: "#ff4444", label: "X", model: "x" },
+            { dir: new THREE.Vector3(0, 1, 0), color: "#44ee44", label: "Y", model: "y" },
+            { dir: new THREE.Vector3(0, 0, 1), color: "#3388ff", label: "Z", model: "z" },
           ];
           gizmoCtx.clearRect(0, 0, s, s);
           // Draw back-facing axes first (dimmed), then front-facing on top
-          const projected = gizmoAxes.map(({ dir, color, label }) => {
+          const projected = gizmoAxes.map(({ dir, color, label, model }) => {
             const px = dir.dot(camRight) * len;
             const py = -dir.dot(camUp) * len; // flip Y for screen coords
             const depth = dir.dot(new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 2));
-            return { px, py, color, label, depth };
+            const forceBright = isTopView && floorModelAxes.has(model);
+            return { px, py, color, label, depth, forceBright };
           });
-          // back-facing (depth > 0 means pointing away from viewer in this projection)
-          for (const a of projected.filter(a => a.depth > 0)) {
+          const isBrightAxis = (axis) => axis.forceBright || axis.depth <= 0;
+          // back-facing axes are dimmed, except floor axes in top view.
+          for (const a of projected.filter(a => !isBrightAxis(a))) {
             gizmoCtx.globalAlpha = 0.25;
             gizmoCtx.strokeStyle = a.color;
             gizmoCtx.lineWidth = 1.5 * pr;
             gizmoCtx.beginPath(); gizmoCtx.moveTo(cx, cy); gizmoCtx.lineTo(cx + a.px, cy + a.py); gizmoCtx.stroke();
           }
-          // front-facing
-          for (const a of projected.filter(a => a.depth <= 0)) {
+          // front-facing axes, plus both floor axes while looking from top.
+          for (const a of projected.filter(isBrightAxis)) {
             gizmoCtx.globalAlpha = 1;
             gizmoCtx.strokeStyle = a.color;
             gizmoCtx.lineWidth = 2 * pr;
@@ -5402,6 +5470,77 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._refreshOfflineAlert();
   }
 
+  _zoneRenderSignature(rowByKey) {
+    const zones = Object.values(this._zones || {}).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const participatingLightKeys = new Set();
+    if (this._mode === "edit") {
+      Object.entries(this._markers || {}).forEach(([key, marker]) => {
+        const row = rowByKey.get(key);
+        if (row?.primaryDomain === "light" && this._supportsLightPath(this._normalizeLightType(marker?.lightType))) {
+          participatingLightKeys.add(key);
+        }
+      });
+    }
+    const zoneData = zones.map((zone) => {
+      Object.entries(this._markers || {}).forEach(([key, marker]) => {
+        const row = rowByKey.get(key);
+        if (row?.primaryDomain === "light" && this._pointInZone(marker, zone)) participatingLightKeys.add(key);
+      });
+      const illuminanceEntity = zone.illuminanceEntity || "";
+      const illuminanceState = illuminanceEntity ? this._hass?.states?.[illuminanceEntity]?.state : "";
+      return {
+        id: zone.id,
+        color: zone.color,
+        height: zone.height,
+        dayOpacity: zone.dayOpacity,
+        nightOpacity: zone.nightOpacity,
+        lightingMode: zone.lightingMode,
+        illuminanceEnabled: zone.illuminanceEnabled === true,
+        illuminanceEntity,
+        illuminanceState,
+        showLux: zone.showLux === true,
+        points: (zone.points || []).map((point) => [
+          Number(point.x) || 0,
+          Number(point.y) || 0,
+          Number(point.z) || 0,
+        ]),
+      };
+    });
+    const lightData = [...participatingLightKeys].sort().map((key) => {
+      const marker = this._markers?.[key] || {};
+      const row = rowByKey.get(key);
+      const stateObj = row?.entityId ? this._hass?.states?.[row.entityId] : null;
+      return {
+        key,
+        state: stateObj?.state || "",
+        brightness: stateObj?.attributes?.brightness ?? "",
+        color: stateObj ? this._lightColor(stateObj) : "",
+        x: marker.x,
+        y: marker.y,
+        z: marker.z,
+        lightType: marker.lightType,
+        lightRadius: marker.lightRadius,
+        lightIntensity: marker.lightIntensity,
+        lightPreset: marker.lightPreset,
+        renderParams: marker.renderParams || {},
+        subSpots: marker.subSpots || [],
+        lightPath: marker.lightPath || [],
+        lightShape: marker.lightShape,
+        lightRect: marker.lightRect || {},
+      };
+    });
+    const ambient = this._ambientDarknessConfig();
+    const ambientState = ambient.entity ? this._hass?.states?.[ambient.entity]?.state : "";
+    return JSON.stringify({
+      mode: this._mode,
+      activeFloorId: this._activeFloorId,
+      ambient,
+      ambientState,
+      zones: zoneData,
+      lights: lightData,
+    });
+  }
+
   _updateDeviceRowsAfterMarkerChange() {
     this.shadowRoot?.querySelectorAll("[data-device]").forEach((row) => {
       const key = row.dataset.device;
@@ -5415,6 +5554,15 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const viewer = this._modelViewer;
     if (!viewer?.zoneGroup || !viewer?.THREE) return;
     const { THREE, zoneGroup } = viewer;
+    const rowByKey = new Map(this._deviceRows().map((row) => [row.key, row]));
+    const signature = this._zoneRenderSignature(rowByKey);
+    if (viewer.zoneRenderSignature === signature) {
+      this._refresh3DZoneLabels();
+      this._refresh3DZonePointOverlay();
+      this._requestRender();
+      return;
+    }
+    viewer.zoneRenderSignature = signature;
     while (zoneGroup.children.length) {
       const child = zoneGroup.children.pop();
       child.traverse?.((object) => {
@@ -5427,7 +5575,6 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       });
     }
 
-    const rowByKey = new Map(this._deviceRows().map((row) => [row.key, row]));
     if (this._mode === "edit") {
       Object.entries(this._markers || {}).forEach(([key, marker]) => {
         const row = rowByKey.get(key);
@@ -5599,37 +5746,36 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (!heightVector.length()) return [];
     const colorValue = color || zone.color || "#f8d66d";
     const opacity = Math.max(0.08, Math.min(0.55, brightness * 0.48));
-    return basePoints.map((start, index) => {
+    const vertices = [];
+    basePoints.forEach((start, index) => {
       const end = basePoints[(index + 1) % basePoints.length];
       const bottomStart = new THREE.Vector3(start.x, start.y, start.z);
       const bottomEnd = new THREE.Vector3(end.x, end.y, end.z);
       const topStart = bottomStart.clone().add(heightVector);
       const topEnd = bottomEnd.clone().add(heightVector);
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute(
-        "position",
-        new THREE.Float32BufferAttribute([
-          bottomStart.x, bottomStart.y, bottomStart.z,
-          bottomEnd.x, bottomEnd.y, bottomEnd.z,
-          topEnd.x, topEnd.y, topEnd.z,
-          bottomStart.x, bottomStart.y, bottomStart.z,
-          topEnd.x, topEnd.y, topEnd.z,
-          topStart.x, topStart.y, topStart.z,
-        ], 3)
+      vertices.push(
+        bottomStart.x, bottomStart.y, bottomStart.z,
+        bottomEnd.x, bottomEnd.y, bottomEnd.z,
+        topEnd.x, topEnd.y, topEnd.z,
+        bottomStart.x, bottomStart.y, bottomStart.z,
+        topEnd.x, topEnd.y, topEnd.z,
+        topStart.x, topStart.y, topStart.z,
       );
-      geometry.computeVertexNormals();
-      const material = new THREE.MeshBasicMaterial({
-        color: colorValue,
-        transparent: true,
-        opacity,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.renderOrder = 2.6;
-      return mesh;
     });
+    if (!vertices.length) return [];
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+    const material = new THREE.MeshBasicMaterial({
+      color: colorValue,
+      transparent: true,
+      opacity,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 2.6;
+    return [mesh];
   }
 
   /** Per-fragment lit wall glow — GPU computes 1/r² distance falloff at every pixel so long walls
@@ -5763,7 +5909,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const glowModelHeight = this._displayToModelVector(this._displayHeightVector(glowHeight));
     const glowHeightVec = new THREE.Vector3(glowModelHeight.x, glowModelHeight.y, glowModelHeight.z);
 
-    const meshes = [];
+    const vertices = [];
     for (let index = 0; index < basePoints.length; index++) {
       const start = basePoints[index];
       const end = basePoints[(index + 1) % basePoints.length];
@@ -5790,38 +5936,37 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       const topStart    = bottomStart.clone().add(glowHeightVec);
       const topEnd      = bottomEnd.clone().add(glowHeightVec);
 
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.Float32BufferAttribute([
+      vertices.push(
         bottomStart.x, bottomStart.y, bottomStart.z,
         bottomEnd.x,   bottomEnd.y,   bottomEnd.z,
         topEnd.x,      topEnd.y,      topEnd.z,
         bottomStart.x, bottomStart.y, bottomStart.z,
         topEnd.x,      topEnd.y,      topEnd.z,
         topStart.x,    topStart.y,    topStart.z,
-      ], 3));
-
-      const material = new THREE.ShaderMaterial({
-        uniforms: {
-          uLightPos:   { value: wallLightPos },
-          uColor:      { value: uColor.clone() },
-          uPeak:       { value: peakBrightness },
-          uRadius:     { value: maxReach },
-          uFalloffExp: { value: falloffExp },
-          uIsSpot:     { value: isSpot ? 1.0 : 0.0 },
-          uSpotDir:    { value: isSpot ? spotDir : baseSpotDir },
-          uConeInner:  { value: Math.cos((rp.angle * (1 - rp.penumbra * 0.75)) || 0.5) },
-          uConeOuter:  { value: Math.cos(rp.angle || 0.95) },
-        },
-        vertexShader, fragmentShader,
-        transparent: true, depthWrite: false,
-        blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-      });
-
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.renderOrder = 2.6;
-      meshes.push(mesh);
+      );
     }
-    return meshes;
+    if (!vertices.length) return [];
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uLightPos:   { value: wallLightPos },
+        uColor:      { value: uColor.clone() },
+        uPeak:       { value: peakBrightness },
+        uRadius:     { value: maxReach },
+        uFalloffExp: { value: falloffExp },
+        uIsSpot:     { value: isSpot ? 1.0 : 0.0 },
+        uSpotDir:    { value: isSpot ? spotDir : baseSpotDir },
+        uConeInner:  { value: Math.cos((rp.angle * (1 - rp.penumbra * 0.75)) || 0.5) },
+        uConeOuter:  { value: Math.cos(rp.angle || 0.95) },
+      },
+      vertexShader, fragmentShader,
+      transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 2.6;
+    return [mesh];
   }
 
   _spotDirectionVector(THREE, params, verticalModelAxis, ax0, ax1) {
@@ -5859,36 +6004,35 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const modelHeight = this._displayToModelVector(this._displayHeightVector(displayHeight));
     const heightVector = new THREE.Vector3(modelHeight.x, modelHeight.y, modelHeight.z);
     if (!heightVector.length()) return [];
-    return basePoints.map((start, index) => {
+    const vertices = [];
+    basePoints.forEach((start, index) => {
       const end = basePoints[(index + 1) % basePoints.length];
       const bottomStart = new THREE.Vector3(start.x, start.y, start.z);
       const bottomEnd = new THREE.Vector3(end.x, end.y, end.z);
       const topStart = bottomStart.clone().add(heightVector);
       const topEnd = bottomEnd.clone().add(heightVector);
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute(
-        "position",
-        new THREE.Float32BufferAttribute([
-          bottomStart.x, bottomStart.y, bottomStart.z,
-          topEnd.x, topEnd.y, topEnd.z,
-          bottomEnd.x, bottomEnd.y, bottomEnd.z,
-          bottomStart.x, bottomStart.y, bottomStart.z,
-          topStart.x, topStart.y, topStart.z,
-          topEnd.x, topEnd.y, topEnd.z,
-        ], 3)
+      vertices.push(
+        bottomStart.x, bottomStart.y, bottomStart.z,
+        topEnd.x, topEnd.y, topEnd.z,
+        bottomEnd.x, bottomEnd.y, bottomEnd.z,
+        bottomStart.x, bottomStart.y, bottomStart.z,
+        topStart.x, topStart.y, topStart.z,
+        topEnd.x, topEnd.y, topEnd.z,
       );
-      geometry.computeVertexNormals();
-      const material = new THREE.MeshBasicMaterial({
-        color: "#020617",
-        transparent: true,
-        opacity,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.renderOrder = 2.2;
-      return mesh;
     });
+    if (!vertices.length) return [];
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+    const material = new THREE.MeshBasicMaterial({
+      color: "#020617",
+      transparent: true,
+      opacity,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 2.2;
+    return [mesh];
   }
 
   _zoneCeilingShadeMesh(THREE, zone, darkness) {
@@ -7420,6 +7564,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       renderParams: existingMarker?.renderParams || {},
       subSpots: existingMarker?.subSpots || [],
       lightPath: existingMarker?.lightPath || [],
+      lightShape: existingMarker?.lightShape || "path",
+      lightRect: existingMarker?.lightRect || { width: 100, depth: 80, angle: 0 },
       x: Math.round(finalPoint.x),
       y: Math.round(finalPoint.y),
       z: Math.round(finalPoint.z),
@@ -10053,6 +10199,15 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
         </section>
 
         <section>
+          <h3>Performance</h3>
+          <div class="editor-grid">
+            ${this._selectInput("model_performance_profile", "Render Profile", [["quality", "Quality"], ["balanced", "Balanced"], ["performance", "Performance"], ["mobile", "Mobile"]], "quality")}
+            ${this._numberInput("model_pixel_ratio", "Pixel Ratio Override", 0, 0, 3, 0.25)}
+          </div>
+          <div class="editor-help">Quality keeps the sharp original render path. Use Balanced, Performance, or Mobile only for heavier models.</div>
+        </section>
+
+        <section>
           <h3>Editing & Display</h3>
           <div class="editor-grid">
             ${this._checkboxInput("allow_edit", "Allow Admin Edit Mode", true)}
@@ -10102,10 +10257,12 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
         </section>
 
         <section>
-          <h3>Markers YAML</h3>
-          <div class="editor-help">Paste only the exported markers block here. Example: <code>markers:</code> followed by the marker list.</div>
-          <textarea data-markers-yaml spellcheck="false">${this._escape(this._markersToYaml(this._config.markers || []))}</textarea>
-          ${this._markerYamlError ? `<div class="editor-error">${this._escape(this._markerYamlError)}</div>` : ""}
+          <h3>Import Config YAML</h3>
+          <div class="editor-help">Paste the full output of <strong>Copy YAML</strong> here. Applies markers, zones, presets, and ambient darkness all at once.</div>
+          <textarea data-full-config-yaml spellcheck="false" placeholder="Paste exported YAML here…"></textarea>
+          <button type="button" data-apply-full-config style="margin-top:6px;padding:5px 12px;border:1px solid var(--primary-color,#03a9f4);border-radius:6px;background:transparent;color:var(--primary-color,#03a9f4);cursor:pointer;font-size:12px;font-weight:700;">Apply</button>
+          ${this._fullConfigError ? `<div class="editor-error">${this._escape(this._fullConfigError)}</div>` : ""}
+          ${this._fullConfigSuccess ? `<div class="editor-success">${this._escape(this._fullConfigSuccess)}</div>` : ""}
         </section>
       </div>
     `;
@@ -10117,7 +10274,10 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
       const eventName = element.type === "checkbox" ? "change" : "change";
       element.addEventListener(eventName, (event) => this._handleConfigInput(event.currentTarget));
     });
-    this.querySelector("[data-markers-yaml]")?.addEventListener("change", (event) => this._handleMarkersYaml(event.currentTarget.value));
+    this.querySelector("[data-apply-full-config]")?.addEventListener("click", () => {
+      const textarea = this.querySelector("[data-full-config-yaml]");
+      if (textarea) this._handleFullConfigYaml(textarea.value);
+    });
   }
 
   _handleConfigInput(input) {
@@ -10151,12 +10311,300 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
 
   _handleMarkersYaml(value) {
     try {
+      const parsed = this._parseFullYaml(String(value || "").trim());
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const applied = this._applyImportedConfig(parsed);
+        if (applied.length) {
+          this._markerYamlError = "";
+          return;
+        }
+      }
       const markers = this._parseMarkersYaml(value);
       this._markerYamlError = "";
       this._commitConfig({ ...(this._config || {}), markers });
     } catch (error) {
       this._markerYamlError = error?.message || "Invalid markers YAML.";
       this._render();
+    }
+  }
+
+  _handleFullConfigYaml(value) {
+    this._fullConfigError = "";
+    this._fullConfigSuccess = "";
+    try {
+      const parsed = this._parseFullYaml(String(value || "").trim());
+      if (!parsed || typeof parsed !== "object") throw new Error("Could not parse YAML.");
+
+      const applied = this._applyImportedConfig(parsed, {
+        beforeCommit: (sections) => {
+          this._fullConfigSuccess = `Applied: ${sections.join(", ")}`;
+        },
+      });
+      if (!applied.length) throw new Error("No recognised sections found. Expected markers:, brightness_zones:, etc.");
+      this._render();
+    } catch (err) {
+      this._fullConfigError = err?.message || "Invalid YAML.";
+      this._render();
+    }
+  }
+
+  _applyImportedConfig(parsed, options = {}) {
+    const expanded = this._expandDottedYamlKeys(parsed);
+    const next = { ...(this._config || {}) };
+    const applied = [];
+    const directKeys = [
+      "title",
+      "model",
+      "model_background",
+      "view_mode",
+      "allow_edit",
+      "show_labels",
+      "show_entity_state",
+      "marker_size",
+      "nudge_step",
+      "marker_tap_action",
+      "marker_hold_action",
+      "edit_marker_tap_action",
+      "edit_marker_hold_action",
+      "marker_hold_ms",
+      "offline_states",
+      "offline_focus_distance",
+      "domains",
+      "integrations",
+      "areas",
+      "coordinate_map",
+      "model_performance_profile",
+      "performance_profile",
+      "model_antialias",
+      "model_pixel_ratio",
+      "three_bundle_url",
+      "three_url",
+      "gltf_loader_url",
+      "gltf_loader_urls",
+      "obj_loader_url",
+      "obj_loader_urls",
+      "orbit_controls_url",
+      "orbit_controls_urls",
+    ];
+
+    directKeys.forEach((key) => {
+      if (expanded[key] !== undefined) {
+        next[key] = expanded[key];
+        applied.push(key);
+      }
+    });
+
+    if (expanded.markers !== undefined) {
+      next.markers = Array.isArray(expanded.markers) ? expanded.markers : [];
+      applied.push("markers");
+    }
+    if (expanded.brightness_zones !== undefined) {
+      next.brightness_zones = Array.isArray(expanded.brightness_zones) ? expanded.brightness_zones : [];
+      applied.push("brightness_zones");
+    }
+    if (expanded.light_presets !== undefined) {
+      next.light_presets = { ...(next.light_presets || {}), ...expanded.light_presets };
+      applied.push("light_presets");
+    }
+    if (expanded.ambient_darkness !== undefined) {
+      next.ambient_darkness = expanded.ambient_darkness;
+      applied.push("ambient_darkness");
+    }
+    if (expanded.default_view !== undefined) {
+      next.default_view = expanded.default_view;
+      applied.push("default_view");
+    }
+    if (expanded.floors !== undefined) {
+      next.floors = Array.isArray(expanded.floors) ? expanded.floors : [];
+      applied.push("floors");
+    }
+
+    if (applied.length) {
+      next.type = next.type || "custom:home-assistant-3d-floorplan";
+      this._cleanupEmptyObjects(next);
+      this._clearImportedLayoutStorage(this._config || {}, next, applied);
+      options.beforeCommit?.(applied, next);
+      this._commitConfig(next);
+    }
+
+    return applied;
+  }
+
+  _clearImportedLayoutStorage(previousConfig, nextConfig, applied) {
+    if (typeof localStorage === "undefined") return;
+    const sections = new Set(applied);
+    const configs = [previousConfig, nextConfig].filter(Boolean);
+    const removeKeys = new Set();
+    configs.forEach((config) => {
+      const hasFloors = Array.isArray(config.floors) && config.floors.length > 0;
+      const path = window.location?.pathname || "dashboard";
+      const cardKey = config.storage_key || config.title || "home-assistant-3d-floorplan";
+      if (sections.has("markers") || sections.has("floors")) {
+        removeKeys.add(`home-assistant-3d-floorplan:${hasFloors ? "floors" : "markers"}:${path}:${cardKey}`);
+      }
+      if (sections.has("brightness_zones") || sections.has("floors")) {
+        removeKeys.add(`home-assistant-3d-floorplan:brightness-zones:${path}:${cardKey}`);
+      }
+      if (sections.has("default_view") || sections.has("floors")) {
+        removeKeys.add(`home-assistant-3d-floorplan:model-default-view:${path}:${cardKey}`);
+      }
+      if (sections.has("light_presets")) {
+        removeKeys.add(`home-assistant-3d-floorplan:light-presets:${path}:${cardKey}`);
+      }
+    });
+    removeKeys.forEach((key) => {
+      try {
+        localStorage.removeItem(key);
+      } catch (_) {
+        // Best effort only; config import should still succeed if storage is blocked.
+      }
+    });
+  }
+
+  /**
+   * Simple but complete YAML parser supporting:
+   * - Objects (key: value)
+   * - Lists (- item)
+   * - Nested structures via indentation
+   * - Scalars: strings, numbers, booleans, null, quoted strings, inline arrays
+   */
+  _parseFullYaml(text) {
+    const raw = text.split(/\r?\n/);
+    // Strip comments and trailing whitespace, keep blank lines for structure
+    const lines = raw.map((l) => {
+      const noComment = l.replace(/#(?=(?:[^"']*["'][^"']*["'])*[^"']*$).*/, "");
+      return noComment.trimEnd();
+    });
+    const result = this._parseYamlBlock(lines, 0, 0);
+    return result.value;
+  }
+
+  _expandDottedYamlKeys(value) {
+    if (Array.isArray(value)) return value.map((item) => this._expandDottedYamlKeys(item));
+    if (!value || typeof value !== "object") return value;
+    const result = {};
+    Object.entries(value).forEach(([rawKey, rawValue]) => {
+      const value = this._expandDottedYamlKeys(rawValue);
+      const parts = String(rawKey).split(".");
+      let target = result;
+      parts.forEach((part, index) => {
+        if (index === parts.length - 1) {
+          if (target[part] && typeof target[part] === "object" && value && typeof value === "object" && !Array.isArray(target[part]) && !Array.isArray(value)) {
+            target[part] = { ...target[part], ...value };
+          } else {
+            target[part] = value;
+          }
+          return;
+        }
+        if (!target[part] || typeof target[part] !== "object" || Array.isArray(target[part])) target[part] = {};
+        target = target[part];
+      });
+    });
+    return result;
+  }
+
+  _parseYamlBlock(lines, startIndex, baseIndent) {
+    let index = startIndex;
+    // Skip blank lines
+    while (index < lines.length && !lines[index].trim()) index++;
+    if (index >= lines.length) return { value: null, nextIndex: index };
+
+    const firstLine = lines[index];
+    const firstIndent = firstLine.search(/\S/);
+    const firstTrimmed = firstLine.trim();
+
+    // Determine if this is a list or object by looking at first non-blank line
+    if (firstTrimmed.startsWith("- ") || firstTrimmed === "-") {
+      // Parse as list
+      const list = [];
+      while (index < lines.length) {
+        const line = lines[index];
+        if (!line.trim()) { index++; continue; }
+        const indent = line.search(/\S/);
+        if (indent < firstIndent) break; // dedented - parent's turn
+        if (indent === firstIndent && line.trim().startsWith("- ")) {
+          const rest = line.trim().slice(2).trim();
+          if (!rest) {
+            // Value is on next lines
+            index++;
+            const child = this._parseYamlBlock(lines, index, firstIndent + 2);
+            list.push(child.value);
+            index = child.nextIndex;
+          } else if (rest.includes(":") && !rest.startsWith("'") && !rest.startsWith('"')) {
+            // Inline key: value - parse as object starting with this key
+            const obj = {};
+            const colonIdx = rest.indexOf(":");
+            const key = rest.slice(0, colonIdx).trim();
+            const val = rest.slice(colonIdx + 1).trim();
+            if (val) {
+              obj[key] = this._parseYamlScalar(val);
+              index++;
+            } else {
+              // Value on next lines
+              index++;
+              const child = this._parseYamlBlock(lines, index, firstIndent + 2);
+              obj[key] = child.value;
+              index = child.nextIndex;
+            }
+            // Continue reading sibling keys at same indent+2
+            while (index < lines.length) {
+              const nextLine = lines[index];
+              if (!nextLine.trim()) { index++; continue; }
+              const nextIndent = nextLine.search(/\S/);
+              if (nextIndent <= firstIndent) break;
+              const nextTrimmed = nextLine.trim();
+              if (nextTrimmed.startsWith("- ")) break;
+              const ci = nextTrimmed.indexOf(":");
+              if (ci < 0) { index++; continue; }
+              const k = nextTrimmed.slice(0, ci).trim();
+              const v = nextTrimmed.slice(ci + 1).trim();
+              if (v) { obj[k] = this._parseYamlScalar(v); index++; }
+              else {
+                index++;
+                const child2 = this._parseYamlBlock(lines, index, nextIndent + 2);
+                obj[k] = child2.value;
+                index = child2.nextIndex;
+              }
+            }
+            list.push(obj);
+          } else {
+            list.push(this._parseYamlScalar(rest));
+            index++;
+          }
+        } else {
+          break;
+        }
+      }
+      return { value: list, nextIndex: index };
+    } else {
+      // Parse as object
+      const obj = {};
+      while (index < lines.length) {
+        const line = lines[index];
+        if (!line.trim()) { index++; continue; }
+        const indent = line.search(/\S/);
+        if (indent < firstIndent) break;
+        if (indent > firstIndent) { index++; continue; } // shouldn't happen at this level
+        const trimmed = line.trim();
+        const ci = trimmed.indexOf(":");
+        if (ci < 0) { index++; continue; }
+        const key = trimmed.slice(0, ci).trim();
+        const val = trimmed.slice(ci + 1).trim();
+        if (val) { obj[key] = this._parseYamlScalar(val); index++; }
+        else {
+          index++;
+          // Skip blank lines to find child indent
+          let peekIdx = index;
+          while (peekIdx < lines.length && !lines[peekIdx].trim()) peekIdx++;
+          if (peekIdx >= lines.length) { obj[key] = null; continue; }
+          const childIndent = lines[peekIdx].search(/\S/);
+          if (childIndent <= firstIndent) { obj[key] = null; continue; }
+          const child = this._parseYamlBlock(lines, index, childIndent);
+          obj[key] = child.value;
+          index = child.nextIndex;
+        }
+      }
+      return { value: obj, nextIndex: index };
     }
   }
 
@@ -10276,6 +10724,13 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
     const text = String(value || "").trim();
     if (!text || text === "markers: []") return [];
     if (text.startsWith("[")) return JSON.parse(text);
+    const parsed = this._parseFullYaml(text);
+    if (Array.isArray(parsed)) return this._expandDottedYamlKeys(parsed);
+    if (parsed && typeof parsed === "object") {
+      const expanded = this._expandDottedYamlKeys(parsed);
+      if (Array.isArray(expanded.markers)) return expanded.markers;
+      if (expanded.markers === null) return [];
+    }
     const lines = text.split(/\r?\n/).map((line) => line.replace(/\t/g, "  ")).filter((line) => line.trim() && !line.trim().startsWith("#"));
     const first = lines[0]?.trim();
     const listLines = first === "markers:" ? lines.slice(1) : lines;

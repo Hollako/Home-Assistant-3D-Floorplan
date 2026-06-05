@@ -1,4 +1,4 @@
-﻿const VERSION = "2.9.8";
+﻿const VERSION = "2.9.9";
 class HomeAssistant3DFloorplan extends HTMLElement {
   static getConfigElement() {
     return document.createElement("home-assistant-3d-floorplan-editor");
@@ -600,6 +600,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         lightPath: this._normalizedLightPath(marker.light_path || marker.lightPath, marker),
         lightShape: marker.light_shape || marker.lightShape || "path",
         lightRect: marker.light_rect || marker.lightRect || { width: 100, depth: 80, angle: 0 },
+        _configLightShapeExplicit: marker.light_shape !== undefined || marker.lightShape !== undefined,
+        _configLightRectExplicit: marker.light_rect !== undefined || marker.lightRect !== undefined,
+        _configLightPathExplicit: marker.light_path !== undefined || marker.lightPath !== undefined,
         x: Number(point.x),
         y: Number(point.y),
         z: Number(point.z),
@@ -634,6 +637,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         lightPath: this._normalizedLightPath(marker.lightPath || marker.light_path, marker),
         lightShape: marker.lightShape || marker.light_shape || "path",
         lightRect: marker.lightRect || marker.light_rect || { width: 100, depth: 80, angle: 0 },
+        ...(marker._configLightShapeExplicit ? { _configLightShapeExplicit: true } : {}),
+        ...(marker._configLightRectExplicit ? { _configLightRectExplicit: true } : {}),
+        ...(marker._configLightPathExplicit ? { _configLightPathExplicit: true } : {}),
         x: is3DMarker ? x : Math.max(0, Math.min(100, x)),
         y: is3DMarker ? y : Math.max(0, Math.min(100, y)),
         ...(is3DMarker ? { z } : {}),
@@ -681,13 +687,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _storageKey() {
     const path = window.location?.pathname || "dashboard";
     const cardKey = this._config.storage_key || this._config.title || "home-assistant-3d-floorplan";
-    return `home-assistant-3d-floorplan:${this._hasMultipleFloors() ? "floors" : "markers"}:${path}:${cardKey}`;
+    return `home-assistant-3d-floorplan:${this._hasMultipleFloors() ? "floors" : "markers"}${this._coordinateStorageSuffix()}:${path}:${cardKey}`;
   }
 
   _zonesStorageKey() {
     const path = window.location?.pathname || "dashboard";
     const cardKey = this._config.storage_key || this._config.title || "home-assistant-3d-floorplan";
-    return `home-assistant-3d-floorplan:brightness-zones:${path}:${cardKey}`;
+    return `home-assistant-3d-floorplan:brightness-zones${this._coordinateStorageSuffix()}:${path}:${cardKey}`;
   }
 
   _displayStorageKey() {
@@ -699,13 +705,20 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _modelDefaultViewStorageKey() {
     const path = window.location?.pathname || "dashboard";
     const cardKey = this._config.storage_key || this._config.title || "home-assistant-3d-floorplan";
-    return `home-assistant-3d-floorplan:model-default-view:${path}:${cardKey}`;
+    return `home-assistant-3d-floorplan:model-default-view${this._coordinateStorageSuffix()}:${path}:${cardKey}`;
   }
 
   _presetsStorageKey() {
     const path = window.location?.pathname || "dashboard";
     const cardKey = this._config.storage_key || this._config.title || "home-assistant-3d-floorplan";
     return `home-assistant-3d-floorplan:light-presets:${path}:${cardKey}`;
+  }
+
+  _coordinateStorageSuffix() {
+    const map = this._coordinateMap();
+    const vertical = this._verticalAxis();
+    const signature = `map-${map.x}${map.y}${map.z}-up-${vertical}`;
+    return signature === "map-xyz-up-y" ? "" : `:${signature}`;
   }
 
   _loadPresets() {
@@ -919,9 +932,31 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return [...new Set([...Object.keys(normalizedConfig), ...Object.keys(normalizedSaved)])].reduce((merged, key) => {
       const configMarker = normalizedConfig[key];
       const savedMarker = normalizedSaved[key];
-      merged[key] = configMarker && savedMarker ? { ...configMarker, ...savedMarker } : savedMarker || configMarker;
+      if (configMarker && savedMarker) {
+        merged[key] = { ...configMarker, ...savedMarker };
+        if (configMarker._configLightShapeExplicit || configMarker._configLightPathExplicit) {
+          merged[key].lightShape = configMarker.lightShape;
+        }
+        if (configMarker._configLightRectExplicit) {
+          merged[key].lightRect = configMarker.lightRect;
+        }
+        if (configMarker._configLightPathExplicit) {
+          merged[key].lightPath = configMarker.lightPath;
+        }
+      } else {
+        merged[key] = savedMarker || configMarker;
+      }
+      this._stripConfigMarkerFlags(merged[key]);
       return merged;
     }, {});
+  }
+
+  _stripConfigMarkerFlags(marker) {
+    if (!marker) return marker;
+    delete marker._configLightShapeExplicit;
+    delete marker._configLightRectExplicit;
+    delete marker._configLightPathExplicit;
+    return marker;
   }
 
   _looksLikeFloorMarkers(value) {
@@ -4593,24 +4628,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                           ]),
                         ]
                       : []),
-                    ...(marker.lightShape === "rect" && marker.lightRect
-                      ? [
-                          `        light_shape: rect`,
-                          `        light_rect:`,
-                          `          width: ${marker.lightRect.width ?? 100}`,
-                          `          depth: ${marker.lightRect.depth ?? 80}`,
-                          `          angle: ${marker.lightRect.angle ?? 0}`,
-                        ]
-                      : marker.lightPath?.length
-                        ? [
-                            `        light_path:`,
-                            ...marker.lightPath.flatMap((point) => [
-                              `          - x: ${point.x}`,
-                              `            y: ${point.y}`,
-                              ...(point.z !== "" ? [`            z: ${point.z}`] : []),
-                            ]),
-                          ]
-                        : []),
+                    ...this._yamlMarkerLightShapeLines(marker, "        "),
                     `        x: ${marker.x}`,
                     `        y: ${marker.y}`,
                     ...(marker.z !== "" ? [`        z: ${marker.z}`] : []),
@@ -4678,16 +4696,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     ]),
                   ]
                 : []),
-              ...(marker.lightPath?.length
-                ? [
-                    `    light_path:`,
-                    ...marker.lightPath.flatMap((point) => [
-                      `      - x: ${point.x}`,
-                      `        y: ${point.y}`,
-                      ...(point.z !== "" ? [`        z: ${point.z}`] : []),
-                    ]),
-                  ]
-                : []),
+              ...this._yamlMarkerLightShapeLines(marker, "    "),
               `    x: ${marker.x}`,
               `    y: ${marker.y}`,
               ...(marker.z !== "" ? [`    z: ${marker.z}`] : []),
@@ -4715,6 +4724,28 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           ]
         : []),
     ].join("\n");
+  }
+
+  _yamlMarkerLightShapeLines(marker, indent) {
+    if (marker.lightShape === "rect" && marker.lightRect) {
+      return [
+        `${indent}light_shape: rect`,
+        `${indent}light_rect:`,
+        `${indent}  width: ${marker.lightRect.width ?? 100}`,
+        `${indent}  depth: ${marker.lightRect.depth ?? 80}`,
+        `${indent}  angle: ${marker.lightRect.angle ?? 0}`,
+      ];
+    }
+
+    if (!marker.lightPath?.length) return [];
+    return [
+      `${indent}light_path:`,
+      ...marker.lightPath.flatMap((point) => [
+        `${indent}  - x: ${point.x}`,
+        `${indent}    y: ${point.y}`,
+        ...(point.z !== "" ? [`${indent}    z: ${point.z}`] : []),
+      ]),
+    ];
   }
 
   _yamlZonePointLines(point, indent) {
@@ -5121,8 +5152,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       });
       resizeObserver.observe(container);
       resize();
-      requestAnimationFrame(resize);
-      window.setTimeout(resize, 250);
+      requestAnimationFrame(() => { if (resize()) needsRender = true; });
+      window.setTimeout(() => { if (resize()) needsRender = true; }, 250);
 
       const animate = () => {
         if (disposed || renderToken !== this._modelRenderToken) return;
@@ -6238,8 +6269,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _update3DZonePointButtons(pointButtons, THREE, camera, container) {
     if (!pointButtons?.length) return;
-    const width = container.clientWidth || 1;
-    const height = container.clientHeight || 1;
+    const rect = container.getBoundingClientRect?.();
+    const width = rect?.width || container.clientWidth || 1;
+    const height = rect?.height || container.clientHeight || 1;
     for (const pointButton of pointButtons) {
       const point = pointButton.position.clone().project(camera);
       const visible = point.z > -1 && point.z < 1;
@@ -6253,8 +6285,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _update3DZoneLabels(zoneLabels, THREE, camera, container) {
     if (!zoneLabels?.length) return;
-    const width = container.clientWidth || 1;
-    const height = container.clientHeight || 1;
+    const rect = container.getBoundingClientRect?.();
+    const width = rect?.width || container.clientWidth || 1;
+    const height = rect?.height || container.clientHeight || 1;
     for (const zoneLabel of zoneLabels) {
       const point = zoneLabel.position.clone().project(camera);
       const visible = point.z > -1 && point.z < 1;
@@ -7508,8 +7541,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
   _update3DMarkerButtons(markerButtons, THREE, camera, container) {
     if (!markerButtons?.length) return;
-    const width = container.clientWidth || 1;
-    const height = container.clientHeight || 1;
+    const rect = container.getBoundingClientRect?.();
+    const width = rect?.width || container.clientWidth || 1;
+    const height = rect?.height || container.clientHeight || 1;
     for (const marker of markerButtons) {
       const point = marker.position.clone().project(camera);
       const visible = point.z > -1 && point.z < 1;
@@ -9283,7 +9317,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           left: 0;
           top: 0;
           display: inline-flex;
+          flex-direction: row;
           align-items: center;
+          justify-content: flex-start;
           gap: 6px;
           max-width: min(240px, 42vw);
           border: 0;
@@ -9295,6 +9331,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           font: inherit;
           padding: 3px 7px 3px 3px;
           pointer-events: auto;
+          text-align: left;
+          writing-mode: horizontal-tb;
           will-change: transform;
         }
 
@@ -9316,6 +9354,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           position: relative;
           z-index: 1;
           display: grid;
+          flex: 0 0 var(--marker-size, 22px);
           place-items: center;
           width: var(--marker-size, 22px);
           height: var(--marker-size, 22px);
@@ -9439,10 +9478,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
         .model-marker strong {
           display: block;
+          min-width: 0;
           max-width: 180px;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+          writing-mode: horizontal-tb;
           font-size: 12px;
         }
 
@@ -9815,7 +9856,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           position: absolute;
           z-index: 3;
           display: flex;
+          flex-direction: row;
           align-items: center;
+          justify-content: flex-start;
           gap: 6px;
           max-width: min(240px, 42vw);
           min-width: 0;
@@ -9827,6 +9870,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           cursor: grab;
           font: inherit;
           padding: 3px 6px 3px 3px;
+          text-align: left;
+          writing-mode: horizontal-tb;
           transform: translate(calc(var(--marker-size) / -2 - 5px), -50%);
         }
 
@@ -9964,6 +10009,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+          writing-mode: horizontal-tb;
           font-size: 12px;
         }
 
@@ -10439,14 +10485,15 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
       const hasFloors = Array.isArray(config.floors) && config.floors.length > 0;
       const path = window.location?.pathname || "dashboard";
       const cardKey = config.storage_key || config.title || "home-assistant-3d-floorplan";
+      const coordinateSuffixes = ["", this._coordinateStorageSuffixForConfig(config)];
       if (sections.has("markers") || sections.has("floors")) {
-        removeKeys.add(`home-assistant-3d-floorplan:${hasFloors ? "floors" : "markers"}:${path}:${cardKey}`);
+        coordinateSuffixes.forEach((suffix) => removeKeys.add(`home-assistant-3d-floorplan:${hasFloors ? "floors" : "markers"}${suffix}:${path}:${cardKey}`));
       }
       if (sections.has("brightness_zones") || sections.has("floors")) {
-        removeKeys.add(`home-assistant-3d-floorplan:brightness-zones:${path}:${cardKey}`);
+        coordinateSuffixes.forEach((suffix) => removeKeys.add(`home-assistant-3d-floorplan:brightness-zones${suffix}:${path}:${cardKey}`));
       }
       if (sections.has("default_view") || sections.has("floors")) {
-        removeKeys.add(`home-assistant-3d-floorplan:model-default-view:${path}:${cardKey}`);
+        coordinateSuffixes.forEach((suffix) => removeKeys.add(`home-assistant-3d-floorplan:model-default-view${suffix}:${path}:${cardKey}`));
       }
       if (sections.has("light_presets")) {
         removeKeys.add(`home-assistant-3d-floorplan:light-presets:${path}:${cardKey}`);
@@ -10459,6 +10506,23 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
         // Best effort only; config import should still succeed if storage is blocked.
       }
     });
+  }
+
+  _coordinateStorageSuffixForConfig(config = {}) {
+    const raw = config.coordinate_map || {};
+    const defaultMap = { x: "x", y: "y", z: "z" };
+    const used = new Set();
+    const fallback = { x: "x", y: "y", z: "z" };
+    const map = ["x", "y", "z"].reduce((result, axis) => {
+      const requestedAxis = raw[axis] || defaultMap[axis];
+      const modelAxis = ["x", "y", "z"].includes(requestedAxis) && !used.has(requestedAxis) ? requestedAxis : fallback[axis];
+      result[axis] = modelAxis;
+      used.add(modelAxis);
+      return result;
+    }, {});
+    const vertical = ["x", "y", "z"].includes(config.vertical_axis) ? config.vertical_axis : "y";
+    const signature = `map-${map.x}${map.y}${map.z}-up-${vertical}`;
+    return signature === "map-xyz-up-y" ? "" : `:${signature}`;
   }
 
   /**

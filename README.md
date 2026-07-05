@@ -86,6 +86,34 @@ Temperature and humidity sensors show their live value on the marker. Use **Mark
 marker_display: value   # auto | icon | value
 ```
 
+### Color Thresholds
+
+Use `color_thresholds` to color a marker dynamically based on its numeric state value. This is particularly useful for temperature, humidity, CO₂, or any sensor with a continuous numeric reading.
+
+```yaml
+markers:
+  - entity: sensor.living_room_temperature
+    name: Living Room
+    marker_display: value
+    color_thresholds:
+      - value: 18
+        color: "#42a5f5"   # blue  — cold
+      - value: 22
+        color: "#66bb6a"   # green — comfortable
+      - value: 26
+        color: "#ef5350"   # red   — hot
+```
+
+**Threshold logic (step, not interpolated):**
+
+- State **below** the first threshold → first threshold color
+- State **between** two thresholds → color of the lower threshold
+- State **at or above** the last threshold → last threshold color
+
+So for the example above: values below 18 are blue, 18–21.9 are blue, 22–25.9 are green, and 26+ are red.
+
+`color_thresholds` works in both 2D (floorplan image) and 3D model view, and accepts any valid CSS color (`#hex`, `rgb()`, named colors). When the entity is offline or unavailable, the standard red offline styling takes precedence.
+
 ## Edit Mode
 
 Switch to Edit Mode to place and configure markers.

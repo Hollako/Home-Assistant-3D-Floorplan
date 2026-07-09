@@ -425,6 +425,46 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return "state-neutral";
   }
 
+  /**
+   * Normalizes a raw color_thresholds config array into a sorted, validated array.
+   * Each entry must have a numeric `value` and a CSS color string `color`.
+   * Entries are sorted ascending by value so threshold lookup is deterministic.
+   * Invalid entries (missing value or color) are silently dropped.
+   */
+  _normalizeColorThresholds(raw) {
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    const entries = raw
+      .map((entry) => ({ value: Number(entry?.value), color: String(entry?.color || "").trim() }))
+      .filter((entry) => Number.isFinite(entry.value) && entry.color.length > 0);
+    if (entries.length === 0) return null;
+    return entries.sort((a, b) => a.value - b.value);
+  }
+
+  /**
+   * Given a sorted color_thresholds array and a numeric state value, returns the
+   * CSS color string for the appropriate threshold band.
+   *
+   * Threshold semantics (step, not interpolated):
+   *   - Below the first threshold value  → first threshold color
+   *   - Between thresholds N and N+1     → threshold N color
+   *   - At or above the last threshold   → last threshold color
+   *
+   * Example with thresholds [{value:18, color:"blue"}, {value:22, color:"green"}, {value:26, color:"red"}]:
+   *   state 15  → blue   (below first threshold)
+   *   state 20  → blue   (between 18 and 22, i.e., >= 18 but < 22)
+   *   state 22  → green  (>= 22 but < 26)
+   *   state 30  → red    (>= last threshold)
+   */
+  _markerColorFromThresholds(thresholds, numericState) {
+    if (!thresholds || thresholds.length === 0 || !Number.isFinite(numericState)) return null;
+    // Walk from highest to lowest; return color of the first threshold <= state
+    for (let i = thresholds.length - 1; i >= 0; i--) {
+      if (numericState >= thresholds[i].value) return thresholds[i].color;
+    }
+    // State is below all thresholds — use the lowest threshold color
+    return thresholds[0].color;
+  }
+
   _markerIcon(row) {
     const markerIcon = this._markers[row.key]?.icon;
     if (markerIcon) return markerIcon;
@@ -603,6 +643,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         _configLightShapeExplicit: marker.light_shape !== undefined || marker.lightShape !== undefined,
         _configLightRectExplicit: marker.light_rect !== undefined || marker.lightRect !== undefined,
         _configLightPathExplicit: marker.light_path !== undefined || marker.lightPath !== undefined,
+        colorThresholds: this._normalizeColorThresholds(marker.color_thresholds || marker.colorThresholds),
         x: Number(point.x),
         y: Number(point.y),
         z: Number(point.z),
@@ -640,6 +681,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         ...(marker._configLightShapeExplicit ? { _configLightShapeExplicit: true } : {}),
         ...(marker._configLightRectExplicit ? { _configLightRectExplicit: true } : {}),
         ...(marker._configLightPathExplicit ? { _configLightPathExplicit: true } : {}),
+        colorThresholds: this._normalizeColorThresholds(marker.colorThresholds || marker.color_thresholds),
         x: is3DMarker ? x : Math.max(0, Math.min(100, x)),
         y: is3DMarker ? y : Math.max(0, Math.min(100, y)),
         ...(is3DMarker ? { z } : {}),
@@ -4508,10 +4550,17 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const content = this._markerFace(row);
     const stateClass = this._stateClass(row);
     const title = this._config.show_entity_state ? `${row.name} - ${row.primaryState}` : row.name;
+    const thresholds = marker?.colorThresholds;
+    const numericState = Number(row.primaryState);
+    const thresholdColor = (!row.offline && thresholds && Number.isFinite(numericState))
+      ? this._markerColorFromThresholds(thresholds, numericState)
+      : null;
+    const thresholdClass = thresholdColor ? "state-threshold" : "";
+    const thresholdStyle = thresholdColor ? ` --marker-threshold-color: ${thresholdColor};` : "";
     return `
       <button
-        class="marker ${this._display.showLabels ? "with-label" : "icon-only"} ${content.type === "value" ? "value-marker" : ""} ${this._config.show_entity_state ? "state-mode" : ""} ${stateClass} ${isEditing && this._selectedMarkers.has(row.key) ? "selected" : ""} ${row.offline ? "offline" : "online"}"
-        style="left: ${this._escape(marker.x)}%; top: ${this._escape(marker.y)}%; --marker-size: ${this._escape(size)}px;"
+        class="marker ${this._display.showLabels ? "with-label" : "icon-only"} ${content.type === "value" ? "value-marker" : ""} ${this._config.show_entity_state ? "state-mode" : ""} ${stateClass} ${thresholdClass} ${isEditing && this._selectedMarkers.has(row.key) ? "selected" : ""} ${row.offline ? "offline" : "online"}"
+        style="left: ${this._escape(marker.x)}%; top: ${this._escape(marker.y)}%; --marker-size: ${this._escape(size)}px;${thresholdStyle}"
         draggable="${isEditing ? "true" : "false"}"
         data-marker="${this._escape(row.key)}"
         data-entity="${this._escape(row.entityId)}"
@@ -5340,11 +5389,17 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       button.type = "button";
       const stateClass = this._stateClass(row);
       const content = this._markerFace(row);
-      button.className = `model-marker ${this._display.showLabels ? "with-label" : "icon-only"} ${content.type === "value" ? "value-marker" : ""} ${stateClass} ${row.offline ? "offline" : "online"}`;
+      const thresholds = marker?.colorThresholds;
+      const numericState = Number(row.primaryState);
+      const thresholdColor = (!row.offline && thresholds && Number.isFinite(numericState))
+        ? this._markerColorFromThresholds(thresholds, numericState)
+        : null;
+      button.className = `model-marker ${this._display.showLabels ? "with-label" : "icon-only"} ${content.type === "value" ? "value-marker" : ""} ${stateClass} ${thresholdColor ? "state-threshold" : ""} ${row.offline ? "offline" : "online"}`;
       button.dataset.marker = row.key;
       button.dataset.entity = row.entityId;
       button.title = `${row.name} - ${row.primaryState}`;
       button.style.setProperty("--marker-size", `${this._display.markerSize}px`);
+      if (thresholdColor) button.style.setProperty("--marker-threshold-color", thresholdColor);
       button.innerHTML = `
         <span class="${content.type === "value" ? "value-face" : ""}">${content.type === "value" ? this._escape(content.value) : `<ha-icon icon="${this._escape(content.icon)}"></ha-icon>`}</span>
         ${this._display.showLabels ? `<strong>${this._escape(row.name)}</strong>` : ""}
@@ -9405,6 +9460,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           box-shadow: 0 0 0 3px rgba(212, 54, 54, 0.98), 0 0 18px rgba(212, 54, 54, 0.95);
         }
 
+        /* color_thresholds: overrides state-based background with the computed threshold color */
+        .model-marker.state-threshold span {
+          background: var(--marker-threshold-color);
+          color: #fff;
+        }
+
         .model-sub-spot {
           background: rgba(248, 214, 109, 0.95);
           color: #111827;
@@ -9992,6 +10053,13 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           background: var(--dmp-bad);
           color: #fff;
           box-shadow: 0 0 0 3px rgba(212, 54, 54, 0.98), 0 0 18px rgba(212, 54, 54, 0.95);
+        }
+
+        /* color_thresholds: overrides state-based background with the computed threshold color */
+        .marker.state-threshold span,
+        .marker.state-mode.state-threshold span {
+          background: var(--marker-threshold-color);
+          color: #fff;
         }
 
         .marker ha-icon {

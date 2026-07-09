@@ -319,13 +319,21 @@ floors:
 
 When you install via HACS or manually, the card file (`Home-Assistant-3D-Floorplan.js`) is stored locally on your Home Assistant instance. Your `.glb` model is also served from your local `/www/` folder.
 
-However, **Three.js (the 3D engine) is not bundled by default**. The card fetches it from the external CDN `esm.sh` on first load:
+When installed through HACS, the card first loads the bundled Three.js build from the HACS-served files:
+
+```yaml
+three_bundle_urls:
+  - /hacsfiles/Home-Assistant-3D-Floorplan/dist/three.bundle.min.js
+  - /local/three.bundle.min.js
+```
+
+If those bundle paths are unavailable, the card falls back to the external CDN `esm.sh`:
 
 ```yaml
 three_url: "https://esm.sh/three@0.165.0"   # default - requires internet
 ```
 
-This means an internet connection is required on every page load unless you take the extra step below.
+The bundled HACS path avoids remote-access and Companion App issues caused by blocked external module imports.
 
 ### Making it fully offline (recommended)
 
@@ -335,13 +343,14 @@ The repository includes a pre-built bundle at `dist/three.bundle.min.js`. Copy i
 /config/www/three.bundle.min.js
 ```
 
-Then point the card at it:
+Then point the card at it if you are not using HACS:
 
 ```yaml
 type: custom:home-assistant-3d-floorplan
 title: 3D Floorplan
 model: /local/floorplans/home.glb
-three_bundle_url: /local/three.bundle.min.js
+three_bundle_urls:
+  - /local/three.bundle.min.js
 ```
 
 With this in place, **everything runs 100% offline** - no external requests, no CDN dependency. This also fixes loading issues in the Home Assistant Companion App on iOS/Android, which can block remote module imports.

@@ -1,4 +1,4 @@
-﻿const VERSION = "2.9.9";
+﻿const VERSION = "2.10.0";
 class HomeAssistant3DFloorplan extends HTMLElement {
   static getConfigElement() {
     return document.createElement("home-assistant-3d-floorplan-editor");
@@ -125,7 +125,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         night_opacity: 1,
       },
       three_url: "https://esm.sh/three@0.165.0",
-      three_bundle_url: "/local/three.bundle.min.js",
+      three_bundle_urls: [
+        "/hacsfiles/Home-Assistant-3D-Floorplan/dist/three.bundle.min.js",
+        "/local/three.bundle.min.js",
+      ],
+      three_bundle_url: "",
       model_performance_profile: "quality",
       model_antialias: null,
       model_pixel_ratio: 0,
@@ -4662,6 +4666,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     ...(marker.lightIntensity !== "" ? [`        light_intensity: ${marker.lightIntensity}`] : []),
                     ...(marker.lightType ? [`        light_type: ${this._threeLightTypeName(marker.lightType)}`, `        light_radius: ${marker.lightRadius || 1.5}`] : []),
                     ...(marker.lightPreset ? [`        light_preset: ${marker.lightPreset}`] : []),
+                    ...this._yamlMarkerColorThresholdLines(marker.colorThresholds, "        "),
                     ...(marker.renderParams ? Object.entries(marker.renderParams).map(([k, v]) => `        render_params.${k}: ${v}`) : []),
                     ...(marker.subSpots?.length
                       ? [
@@ -4730,6 +4735,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               ...(marker.lightIntensity !== "" ? [`    light_intensity: ${marker.lightIntensity}`] : []),
               ...(marker.lightType ? [`    light_type: ${this._threeLightTypeName(marker.lightType)}`, `    light_radius: ${marker.lightRadius || 1.5}`] : []),
               ...(marker.lightPreset ? [`    light_preset: ${marker.lightPreset}`] : []),
+              ...this._yamlMarkerColorThresholdLines(marker.colorThresholds, "    "),
               ...(marker.renderParams ? Object.entries(marker.renderParams).map(([k, v]) => `    render_params.${k}: ${v}`) : []),
               ...(marker.subSpots?.length
                 ? [
@@ -4797,6 +4803,18 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     ];
   }
 
+  _yamlMarkerColorThresholdLines(thresholds, indent) {
+    const normalized = this._normalizeColorThresholds(thresholds);
+    if (!normalized?.length) return [];
+    return [
+      `${indent}color_thresholds:`,
+      ...normalized.flatMap((threshold) => [
+        `${indent}  - value: ${threshold.value}`,
+        `${indent}    color: ${this._yamlScalar(threshold.color)}`,
+      ]),
+    ];
+  }
+
   _yamlZonePointLines(point, indent) {
     const entries = Object.entries(point);
     if (!entries.length) return [];
@@ -4834,6 +4852,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           lightType: this._normalizeLightType(marker.lightType),
           lightRadius: this._normalizeLightRadius(marker.lightRadius),
           lightPreset: marker.lightPreset || "",
+          colorThresholds: this._normalizeColorThresholds(marker.colorThresholds || marker.color_thresholds),
           renderParams: marker.renderParams && Object.keys(marker.renderParams).length ? marker.renderParams : null,
           lightShape: marker.lightShape || marker.light_shape || "path",
           lightRect: marker.lightRect || marker.light_rect || null,
@@ -4887,6 +4906,17 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (this._config.model_antialias !== null && this._config.model_antialias !== undefined) {
       lines.push(`model_antialias: ${this._config.model_antialias !== false ? "true" : "false"}`);
     }
+    const customBundleUrls = this._asList(this._config.three_bundle_urls).filter(
+      (url) => ![
+        "/hacsfiles/Home-Assistant-3D-Floorplan/dist/three.bundle.min.js",
+        "/local/three.bundle.min.js",
+      ].includes(url)
+    );
+    if (customBundleUrls.length) {
+      lines.push("three_bundle_urls:");
+      customBundleUrls.forEach((url) => lines.push(`  - ${url}`));
+    }
+    if (this._config.three_bundle_url) lines.push(`three_bundle_url: ${this._config.three_bundle_url}`);
     return lines;
   }
 
@@ -10491,6 +10521,7 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
       "performance_profile",
       "model_antialias",
       "model_pixel_ratio",
+      "three_bundle_urls",
       "three_bundle_url",
       "three_url",
       "gltf_loader_url",

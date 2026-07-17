@@ -86,6 +86,34 @@ Temperature and humidity sensors show their live value on the marker. Use **Mark
 marker_display: value   # auto | icon | value
 ```
 
+### Color Thresholds
+
+Use `color_thresholds` to color a marker dynamically based on its numeric state value. This is particularly useful for temperature, humidity, CO₂, or any sensor with a continuous numeric reading.
+
+```yaml
+markers:
+  - entity: sensor.living_room_temperature
+    name: Living Room
+    marker_display: value
+    color_thresholds:
+      - value: 18
+        color: "#42a5f5"   # blue  — cold
+      - value: 22
+        color: "#66bb6a"   # green — comfortable
+      - value: 26
+        color: "#ef5350"   # red   — hot
+```
+
+**Threshold logic (step, not interpolated):**
+
+- State **below** the first threshold → first threshold color
+- State **between** two thresholds → color of the lower threshold
+- State **at or above** the last threshold → last threshold color
+
+So for the example above: values below 18 are blue, 18–21.9 are blue, 22–25.9 are green, and 26+ are red.
+
+`color_thresholds` works in both 2D (floorplan image) and 3D model view, and accepts any valid CSS color (`#hex`, `rgb()`, named colors). When the entity is offline or unavailable, the standard red offline styling takes precedence.
+
 ## Edit Mode
 
 Switch to Edit Mode to place and configure markers.
@@ -291,13 +319,21 @@ floors:
 
 When you install via HACS or manually, the card file (`Home-Assistant-3D-Floorplan.js`) is stored locally on your Home Assistant instance. Your `.glb` model is also served from your local `/www/` folder.
 
-However, **Three.js (the 3D engine) is not bundled by default**. The card fetches it from the external CDN `esm.sh` on first load:
+When installed through HACS, the card first loads the bundled Three.js build from the HACS-served files:
+
+```yaml
+three_bundle_urls:
+  - /hacsfiles/Home-Assistant-3D-Floorplan/dist/three.bundle.min.js
+  - /local/three.bundle.min.js
+```
+
+If those bundle paths are unavailable, the card falls back to the external CDN `esm.sh`:
 
 ```yaml
 three_url: "https://esm.sh/three@0.165.0"   # default - requires internet
 ```
 
-This means an internet connection is required on every page load unless you take the extra step below.
+The bundled HACS path avoids remote-access and Companion App issues caused by blocked external module imports.
 
 ### Making it fully offline (recommended)
 
@@ -307,13 +343,14 @@ The repository includes a pre-built bundle at `dist/three.bundle.min.js`. Copy i
 /config/www/three.bundle.min.js
 ```
 
-Then point the card at it:
+Then point the card at it if you are not using HACS:
 
 ```yaml
 type: custom:home-assistant-3d-floorplan
 title: 3D Floorplan
 model: /local/floorplans/home.glb
-three_bundle_url: /local/three.bundle.min.js
+three_bundle_urls:
+  - /local/three.bundle.min.js
 ```
 
 With this in place, **everything runs 100% offline** - no external requests, no CDN dependency. This also fixes loading issues in the Home Assistant Companion App on iOS/Android, which can block remote module imports.

@@ -85,6 +85,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._modelCameraState = null;
     this._modelDefaultViews = {};
     this._modelViewAnimation = 0;
+    this._modelLoadingUrl = "";
+    this._modelLoadFailedUrl = "";
     this._threeModules = null;
     this._threeModulesPromise = null;
     this._boundKeydown = (event) => this._handleKeydown(event);
@@ -221,6 +223,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (this._config.view_mode !== "3d" && !this._config.model) return false;
     const activeFloor = this._activeFloor();
     const model = activeFloor.model || this._config.model || "";
+    const container = this.shadowRoot?.querySelector("[data-model-viewer]");
+    if (model && container?.isConnected && this.shadowRoot?.contains(container)) {
+      if (this._modelLoadingUrl === model || this._modelLoadFailedUrl === model) return true;
+    }
     return Boolean(
       model &&
         this._modelViewer?.container?.isConnected &&
@@ -1728,6 +1734,52 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       element.addEventListener("pointerdown", (event) => event.stopPropagation());
       element.addEventListener("change", (event) => {
         this._updateMarkerDisplay(event.currentTarget.dataset.markerDisplay, event.currentTarget.value);
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-add-color-threshold]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._addColorThreshold(event.currentTarget.dataset.addColorThreshold);
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-remove-color-threshold]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._removeColorThreshold(event.currentTarget.dataset.removeColorThreshold, Number(event.currentTarget.dataset.thresholdIndex));
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-color-threshold-value]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        this._updateColorThreshold(event.currentTarget.dataset.colorThresholdValue, Number(event.currentTarget.dataset.thresholdIndex), {
+          value: event.currentTarget.value,
+        });
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-color-threshold-color]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("input", (event) => {
+        this._syncColorThresholdText(event.currentTarget);
+      });
+      element.addEventListener("change", (event) => {
+        this._updateColorThreshold(event.currentTarget.dataset.colorThresholdColor, Number(event.currentTarget.dataset.thresholdIndex), {
+          color: event.currentTarget.value,
+        });
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-color-threshold-text]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        this._updateColorThreshold(event.currentTarget.dataset.colorThresholdText, Number(event.currentTarget.dataset.thresholdIndex), {
+          color: event.currentTarget.value,
+        });
       });
     });
 
@@ -4011,6 +4063,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       </div>
       ${row ? this._iconSelect(row) : ""}
       ${row ? this._markerDisplayEditor(row) : ""}
+      ${row ? this._colorThresholdEditor(row) : ""}
       ${row ? this._actionEditor(row) : ""}
       ${row ? this._lightIntensityEditor(row) : ""}
       <div class="coordinate-editor selected-coordinates">
@@ -4548,6 +4601,36 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     `;
   }
 
+  _colorThresholdEditor(row) {
+    const marker = this._markers[row.key] || {};
+    const thresholds = this._normalizeColorThresholds(marker.colorThresholds || marker.color_thresholds) || [];
+    const numericState = Number(row.primaryState);
+    const shouldShow = thresholds.length || Number.isFinite(numericState) || row.primaryDomain === "sensor";
+    if (!shouldShow) return "";
+    const rows = thresholds.map((threshold, index) => `
+      <div class="color-threshold-row">
+        <input data-color-threshold-value="${this._escape(row.key)}" data-threshold-index="${index}" type="number" step="0.1" value="${this._escape(threshold.value)}" aria-label="Threshold value" />
+        <input data-color-threshold-color="${this._escape(row.key)}" data-threshold-index="${index}" type="color" value="${this._escape(this._hexColorValue(threshold.color))}" aria-label="Threshold color" />
+        <input data-color-threshold-text="${this._escape(row.key)}" data-threshold-index="${index}" type="text" value="${this._escape(threshold.color)}" aria-label="CSS color" />
+        <button type="button" class="remove" data-remove-color-threshold="${this._escape(row.key)}" data-threshold-index="${index}" title="Remove threshold">Remove</button>
+      </div>
+    `).join("");
+    return `
+      <div class="color-threshold-editor">
+        <div class="color-threshold-header">
+          <span>Color thresholds</span>
+          <button type="button" data-add-color-threshold="${this._escape(row.key)}">Add</button>
+        </div>
+        ${rows || `<div class="color-threshold-empty">No thresholds yet.</div>`}
+      </div>
+    `;
+  }
+
+  _hexColorValue(color) {
+    const text = String(color || "").trim();
+    return /^#[0-9a-f]{6}$/i.test(text) ? text : "#66bb6a";
+  }
+
   _markerTemplate(row, isEditing) {
     const marker = this._markers[row.key];
     const size = this._display.markerSize;
@@ -5049,7 +5132,11 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const container = this.shadowRoot?.querySelector("[data-model-viewer]");
     const status = this.shadowRoot?.querySelector("[data-model-status]");
     if (!container || !modelUrl) return;
+    if (this._modelLoadingUrl === modelUrl || this._modelLoadFailedUrl === modelUrl) return;
     const renderToken = ++this._modelRenderToken;
+    this._modelLoadingUrl = modelUrl;
+    this._modelLoadFailedUrl = "";
+    let renderer = null;
 
     try {
       if (!window.WebGLRenderingContext) {
@@ -5058,7 +5145,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       const { THREE, GLTFLoader, OBJLoader, OrbitControls } = await this._loadThreeModules();
       if (renderToken !== this._modelRenderToken || !this.shadowRoot?.contains(container)) return;
 
-      status.textContent = "Loading 3D model...";
+      if (status) status.textContent = "Loading 3D model...";
       const scene = new THREE.Scene();
       const background = this._config.model_background || getComputedStyle(this).getPropertyValue("--card-background-color") || "#111827";
       scene.background = new THREE.Color(String(background).trim() || "#111827");
@@ -5067,7 +5154,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       const profile = this._modelPerformanceProfile();
       const antialias = this._modelAntialias(profile);
       const pixelRatio = this._modelPixelRatio(profile);
-      const renderer = new THREE.WebGLRenderer({ antialias, alpha: false });
+      renderer = new THREE.WebGLRenderer({ antialias, alpha: false });
       renderer.setPixelRatio(pixelRatio);
       if ("outputColorSpace" in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.domElement.style.touchAction = "none";
@@ -5138,6 +5225,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         return;
       }
       if (!model) throw new Error("Model file loaded but did not contain a scene.");
+      this._modelLoadingUrl = "";
 
       scene.add(model);
       const zoneGroup = new THREE.Group();
@@ -5339,6 +5427,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         requestAnimationFrame(() => this._focusMarker(pendingFocus.key || pendingFocus, pendingFocus.options || {}));
       }
     } catch (error) {
+      if (renderToken === this._modelRenderToken) {
+        this._modelLoadingUrl = "";
+        this._modelLoadFailedUrl = modelUrl;
+      }
+      renderer?.dispose?.();
+      renderer?.domElement?.remove?.();
       console.warn("home-assistant-3d-floorplan: 3D model could not be loaded", error);
       if (status) {
         status.hidden = false;
@@ -7400,6 +7494,69 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
   }
 
+  _colorThresholdsForMarker(key) {
+    const marker = this._markers[key];
+    if (!marker) return [];
+    return this._normalizeColorThresholds(marker.colorThresholds || marker.color_thresholds) || [];
+  }
+
+  _setColorThresholds(key, thresholds, options = {}) {
+    const marker = this._markers[key];
+    if (!marker) return;
+    const normalized = this._normalizeColorThresholds(thresholds);
+    if (!options.skipHistory) this._pushMarkerHistory();
+    if (normalized?.length) marker.colorThresholds = normalized;
+    else delete marker.colorThresholds;
+    delete marker.color_thresholds;
+    this._saveMarkers();
+    this._refresh3DMarkerOverlay();
+    this._refreshDeviceRow(key);
+    if (this._selectedMarkers.has(key)) this._refreshSelectedMarkerPanel();
+  }
+
+  _addColorThreshold(key) {
+    const marker = this._markers[key];
+    if (!marker) return;
+    const row = this._deviceRows().find((item) => item.key === key);
+    const numericState = Number(row?.primaryState);
+    const thresholds = this._colorThresholdsForMarker(key);
+    const fallbackValue = thresholds.length
+      ? thresholds[thresholds.length - 1].value + 1
+      : Number.isFinite(numericState)
+        ? numericState
+        : 0;
+    this._setColorThresholds(key, [...thresholds, { value: fallbackValue, color: "#66bb6a" }]);
+  }
+
+  _removeColorThreshold(key, index) {
+    const thresholds = this._colorThresholdsForMarker(key);
+    if (!Number.isInteger(index) || index < 0 || index >= thresholds.length) return;
+    thresholds.splice(index, 1);
+    this._setColorThresholds(key, thresholds);
+  }
+
+  _updateColorThreshold(key, index, patch) {
+    const thresholds = this._colorThresholdsForMarker(key);
+    if (!Number.isInteger(index) || index < 0 || index >= thresholds.length) return;
+    if (patch.value !== undefined && !Number.isFinite(Number(patch.value))) return;
+    if (patch.color !== undefined && !String(patch.color || "").trim()) return;
+    const next = thresholds.map((threshold, thresholdIndex) => {
+      if (thresholdIndex !== index) return threshold;
+      return {
+        value: patch.value !== undefined ? Number(patch.value) : threshold.value,
+        color: patch.color !== undefined ? String(patch.color || "").trim() : threshold.color,
+      };
+    });
+    this._setColorThresholds(key, next);
+  }
+
+  _syncColorThresholdText(colorInput) {
+    const key = colorInput?.dataset?.colorThresholdColor;
+    const index = colorInput?.dataset?.thresholdIndex;
+    const textInput = this.shadowRoot?.querySelector(`[data-color-threshold-text="${this._cssEscape(key)}"][data-threshold-index="${this._cssEscape(index)}"]`);
+    if (textInput) textInput.value = colorInput.value;
+  }
+
   _updateLightIntensity(key, value, options = {}) {
     if (!this._markers[key]) return;
     const intensity = this._normalizeLightIntensity(value);
@@ -7676,6 +7833,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       markerDisplay: existingMarker?.markerDisplay || "",
       tapAction: existingMarker?.tapAction || "",
       holdAction: existingMarker?.holdAction || "",
+      colorThresholds: this._normalizeColorThresholds(existingMarker?.colorThresholds || existingMarker?.color_thresholds),
       lightIntensity: this._normalizeLightIntensity(existingMarker?.lightIntensity),
       lightType: this._normalizeLightType(existingMarker?.lightType),
       lightRadius: this._normalizeLightRadius(existingMarker?.lightRadius),
@@ -7798,6 +7956,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _disposeModelViewer({ preserveCamera = false } = {}) {
     this._modelRenderToken += 1;
     this._modelKeyboardNavigationActive = false;
+    this._modelLoadingUrl = "";
+    this._modelLoadFailedUrl = "";
     if (!this._modelViewer) return;
     const { scene, renderer, controls, resizeObserver, animationFrame, dispose } = this._modelViewer;
     if (!preserveCamera) this._captureModelCameraState();
@@ -8386,6 +8546,69 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           font: inherit;
           font-size: 12px;
           padding: 0 6px;
+        }
+
+        .color-threshold-editor {
+          grid-column: 1 / 4;
+          display: grid;
+          gap: 6px;
+          margin-bottom: 8px;
+        }
+
+        .color-threshold-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+
+        .color-threshold-header span {
+          color: var(--dmp-muted);
+          font-size: 10px;
+          font-weight: 800;
+        }
+
+        .color-threshold-header button,
+        .color-threshold-row button {
+          min-height: 26px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 6px;
+          background: var(--secondary-background-color, #f7f8fa);
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font: inherit;
+          font-size: 11px;
+          font-weight: 700;
+          padding: 0 8px;
+        }
+
+        .color-threshold-row {
+          display: grid;
+          grid-template-columns: minmax(0, 72px) 34px minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .color-threshold-row input {
+          min-width: 0;
+          min-height: 28px;
+          border: 1px solid var(--dmp-border);
+          border-radius: 6px;
+          background: var(--secondary-background-color, #f7f8fa);
+          color: var(--primary-text-color);
+          font: inherit;
+          font-size: 12px;
+          padding: 0 6px;
+        }
+
+        .color-threshold-row input[type="color"] {
+          padding: 2px;
+        }
+
+        .color-threshold-empty {
+          color: var(--dmp-muted);
+          font-size: 11px;
+          font-weight: 700;
         }
 
         .light-intensity-editor {
@@ -9732,6 +9955,23 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         .selected-marker-panel .marker-display-picker {
           grid-column: auto;
           margin-bottom: 8px;
+        }
+
+        .selected-marker-panel .color-threshold-editor {
+          grid-column: auto;
+        }
+
+        .selected-marker-panel .color-threshold-header span,
+        .selected-marker-panel .color-threshold-empty {
+          color: rgba(255, 255, 255, 0.72);
+        }
+
+        .selected-marker-panel .color-threshold-header button,
+        .selected-marker-panel .color-threshold-row button,
+        .selected-marker-panel .color-threshold-row input {
+          border-color: rgba(255, 255, 255, 0.22);
+          background: rgba(15, 23, 42, 0.9);
+          color: #fff;
         }
 
         .selected-marker-panel .action-editor span {

@@ -114,6 +114,8 @@ So for the example above: values below 18 are blue, 18–21.9 are blue, 22–25.
 
 `color_thresholds` works in both 2D (floorplan image) and 3D model view, and accepts any valid CSS color (`#hex`, `rgb()`, named colors). When the entity is offline or unavailable, the standard red offline styling takes precedence.
 
+In Edit Mode, select a numeric sensor marker and use **Color thresholds** in the marker settings panel to add, edit, or remove threshold rows.
+
 ## Edit Mode
 
 Switch to Edit Mode to place and configure markers.

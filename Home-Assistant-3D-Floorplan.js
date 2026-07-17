@@ -14,6 +14,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       markers: [],
       floors: [],
       brightness_zones: [],
+      animations: [],
+      interactive_objects: [],
     };
   }
 
@@ -107,6 +109,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       markers: [],
       floors: [],
       brightness_zones: [],
+      animations: [],
+      interactive_objects: [],
       view_mode: "3d",
       default_view: null,
       model: "",
@@ -136,8 +140,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       model_antialias: null,
       model_pixel_ratio: 0,
       gltf_loader_url: "https://esm.sh/three@0.165.0/examples/jsm/loaders/GLTFLoader.js",
+      gltf_loader_urls: ["https://esm.sh/three@0.165.0/examples/jsm/loaders/GLTFLoader.js", "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/loaders/GLTFLoader.js"],
       obj_loader_url: "https://esm.sh/three@0.165.0/examples/jsm/loaders/OBJLoader.js",
+      obj_loader_urls: ["https://esm.sh/three@0.165.0/examples/jsm/loaders/OBJLoader.js", "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/loaders/OBJLoader.js"],
       orbit_controls_url: "https://esm.sh/three@0.165.0/examples/jsm/controls/OrbitControls.js",
+      orbit_controls_urls: ["https://esm.sh/three@0.165.0/examples/jsm/controls/OrbitControls.js", "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/controls/OrbitControls.js"],
+      three_urls: ["https://esm.sh/three@0.165.0", "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js"],
       projection_tilt: 58,
       projection_rotate: -32,
       projection_depth: 28,
@@ -564,6 +572,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
             image: config.image || "",
             model: config.model || "",
             markers: config.markers || [],
+            animations: config.animations || [],
+            interactive_objects: config.interactive_objects || [],
           },
         ];
     const seen = new Set();
@@ -586,6 +596,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         default_view: floor.default_view || floor.defaultView || null,
         markers: Array.isArray(floor.markers) ? floor.markers : [],
         brightness_zones: Array.isArray(floor.brightness_zones) ? floor.brightness_zones : [],
+        animations: Array.isArray(floor.animations) ? floor.animations : [],
+        interactive_objects: Array.isArray(floor.interactive_objects) ? floor.interactive_objects : [],
       };
     });
   }
@@ -5063,36 +5075,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (this._threeModulesPromise) return this._threeModulesPromise;
 
     this._threeModulesPromise = (async () => {
-      // 1. Try a single local bundle (offline-safe). Users copy dist/three.bundle.min.js
-      //    to their HA /local/ directory alongside the card.
-      const bundleUrls = this._asList(this._config.three_bundle_urls).concat(
-        this._config.three_bundle_url ? [this._config.three_bundle_url] : []
-      );
-      for (const url of bundleUrls) {
-        try {
-          const mod = await import(url);
-          if (mod.GLTFLoader && mod.OBJLoader && mod.OrbitControls) {
-            this._threeModules = { THREE: mod, GLTFLoader: mod.GLTFLoader, OBJLoader: mod.OBJLoader, OrbitControls: mod.OrbitControls };
-            return this._threeModules;
-          }
-        } catch (_) {
-          // bundle not found — fall through to individual CDN imports
-        }
-      }
-
-      // 2. Fall back to loading four separate modules (requires internet).
-      const [THREE, gltfModule, objModule, controlsModule] = await Promise.all([
-        this._importFirst(this._asList(this._config.three_urls).concat(this._config.three_url), "Three.js"),
-        this._importFirst(this._asList(this._config.gltf_loader_urls).concat(this._config.gltf_loader_url), "GLTFLoader"),
-        this._importFirst(this._asList(this._config.obj_loader_urls).concat(this._config.obj_loader_url), "OBJLoader"),
-        this._importFirst(this._asList(this._config.orbit_controls_urls).concat(this._config.orbit_controls_url), "OrbitControls"),
+      // Use esm.sh which rewrites bare specifiers internally (no import map needed).
+      const [THREE, { GLTFLoader }, { OBJLoader }, { OrbitControls }] = await Promise.all([
+        import("https://esm.sh/three@0.165.0"),
+        import("https://esm.sh/three@0.165.0/examples/jsm/loaders/GLTFLoader.js"),
+        import("https://esm.sh/three@0.165.0/examples/jsm/loaders/OBJLoader.js"),
+        import("https://esm.sh/three@0.165.0/examples/jsm/controls/OrbitControls.js"),
       ]);
-      this._threeModules = {
-        THREE,
-        GLTFLoader: gltfModule.GLTFLoader,
-        OBJLoader: objModule.OBJLoader,
-        OrbitControls: controlsModule.OrbitControls,
-      };
+      this._threeModules = { THREE, GLTFLoader, OBJLoader, OrbitControls };
       return this._threeModules;
     })();
 
@@ -5231,6 +5221,129 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       const zoneGroup = new THREE.Group();
       zoneGroup.renderOrder = 1;
       scene.add(zoneGroup);
+
+      // --- Animated 3D Objects ---
+      const activeFloorForAnim = this._activeFloor();
+      const animationConfigs = activeFloorForAnim.animations || this._config.animations || [];
+      const animatedObjects = animationConfigs.map((anim) => {
+        const mesh = model.getObjectByName(anim.object_name);
+        if (!mesh) {
+          console.warn(`home-assistant-3d-floorplan: animation object "${anim.object_name}" not found in model`);
+          return null;
+        }
+        // Center the geometry vertices around local origin so rotation spins in place.
+        // SH3D exports bake world-space vertex positions with object position at (0,0,0),
+        // so rotating the object orbits the world origin without this fix.
+        mesh.traverse((child) => {
+          if (child.isMesh && child.geometry) {
+            child.geometry.computeBoundingBox();
+            const center = new THREE.Vector3();
+            child.geometry.boundingBox.getCenter(center);
+            child.geometry.translate(-center.x, -center.y, -center.z);
+            child.position.add(center);
+          }
+        });
+        return {
+          mesh,
+          entity: anim.entity,
+          type: anim.type || "rotate",
+          axis: (anim.axis || "y").toLowerCase(),
+          speed: Number(anim.speed) || 1,
+          stateOn: anim.state_on || "on",
+          amplitude: Number(anim.amplitude) || 0.5,
+          // For oscillate: track accumulated phase
+          phase: 0,
+          // For bob: store original position
+          originalY: mesh.position.y,
+          originalX: mesh.position.x,
+          originalZ: mesh.position.z,
+        };
+      }).filter(Boolean);
+      let animLastTime = performance.now();
+
+      // --- Interactive 3D Objects ---
+      const interactiveConfigs = activeFloorForAnim.interactive_objects || this._config.interactive_objects || [];
+      const interactiveObjectMap = new Map(); // mesh → config
+      const interactiveNameMap = new Map();   // object_name → { mesh, config, originalMaterials }
+      for (const iObj of interactiveConfigs) {
+        const mesh = model.getObjectByName(iObj.object_name);
+        if (!mesh) {
+          console.warn(`home-assistant-3d-floorplan: interactive object "${iObj.object_name}" not found in model`);
+          continue;
+        }
+        // Collect all meshes in the subtree (the named object may be a group)
+        const meshes = [];
+        mesh.traverse((child) => { if (child.isMesh) meshes.push(child); });
+        if (meshes.length === 0) meshes.push(mesh);
+        // Store original materials so we can restore them
+        const originalMaterials = meshes.map((m) => ({
+          mesh: m,
+          color: m.material?.color?.clone?.(),
+          opacity: m.material?.opacity ?? 1,
+          transparent: m.material?.transparent ?? false,
+        }));
+        const entry = {
+          root: mesh,
+          meshes,
+          config: iObj,
+          entity: iObj.entity,
+          tapAction: iObj.tap_action || "toggle",
+          holdAction: iObj.hold_action || "more-info",
+          stateStyles: iObj.state_styles || {},
+          originalMaterials,
+          lastAppliedState: null,
+        };
+        interactiveNameMap.set(iObj.object_name, entry);
+        interactiveObjectMap.set(mesh, entry); // register root for parent-walk lookups
+        for (const m of meshes) {
+          interactiveObjectMap.set(m, entry);
+        }
+      }
+
+      // Apply initial state styles
+      // Apply/update state styles for interactive objects. Returns true if any material changed.
+      const applyInteractiveStyles = () => {
+        let changed = false;
+        for (const [, entry] of interactiveNameMap) {
+          const entityState = this._hass?.states?.[entry.entity]?.state || "";
+          if (entityState === entry.lastAppliedState) continue;
+          entry.lastAppliedState = entityState;
+          changed = true;
+          const style = entry.stateStyles[entityState];
+          if (style) {
+            for (const orig of entry.originalMaterials) {
+              if (!orig.mesh.material) continue;
+              // Clone material on first style change to avoid mutating shared materials
+              if (!orig.mesh.material._interactiveCloned) {
+                orig.mesh.material = orig.mesh.material.clone();
+                orig.mesh.material._interactiveCloned = true;
+              }
+              if (style.color) {
+                orig.mesh.material.color.set(style.color);
+              } else if (orig.color) {
+                orig.mesh.material.color.copy(orig.color);
+              }
+              if (style.opacity !== undefined) {
+                orig.mesh.material.opacity = Number(style.opacity);
+                orig.mesh.material.transparent = Number(style.opacity) < 1;
+              } else {
+                orig.mesh.material.opacity = orig.opacity;
+                orig.mesh.material.transparent = orig.transparent;
+              }
+            }
+          } else {
+            // Restore originals when no style matches
+            for (const orig of entry.originalMaterials) {
+              if (!orig.mesh.material?._interactiveCloned) continue;
+              if (orig.color) orig.mesh.material.color.copy(orig.color);
+              orig.mesh.material.opacity = orig.opacity;
+              orig.mesh.material.transparent = orig.transparent;
+            }
+          }
+        }
+        return changed;
+      };
+
       this._fitCameraToObject(THREE, camera, controls, model);
       const configuredFocusDistance = Number(this._config.offline_focus_distance);
       const fittedCameraDistance = Math.max(1.2, camera.position.distanceTo(controls.target));
@@ -5258,13 +5371,66 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       });
       const modelBounds = new THREE.Box3().setFromObject(model);
 
+      // Cursor feedback for interactive objects
+      if (interactiveObjectMap.size > 0) {
+        const hoverPointer = new THREE.Vector2();
+        renderer.domElement.addEventListener("pointermove", (event) => {
+          if (this._mode === "edit") { renderer.domElement.style.cursor = ""; return; }
+          const rect = renderer.domElement.getBoundingClientRect();
+          hoverPointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          hoverPointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+          raycaster.setFromCamera(hoverPointer, camera);
+          const hits = raycaster.intersectObjects(pickableObjects, true);
+          let found = false;
+          for (const hit of hits) {
+            let obj = hit.object;
+            while (obj) {
+              if (interactiveObjectMap.has(obj)) { found = true; break; }
+              obj = obj.parent;
+            }
+            if (found) break;
+          }
+          renderer.domElement.style.cursor = found ? "pointer" : "";
+        });
+      }
+
       renderer.domElement.addEventListener("pointerdown", (event) => {
         this._modelKeyboardNavigationActive = true;
         renderer.domElement.focus?.({ preventScroll: true });
-        pointerStart = { x: event.clientX, y: event.clientY };
+        pointerStart = { x: event.clientX, y: event.clientY, time: performance.now() };
       });
 
       renderer.domElement.addEventListener("pointerup", (event) => {
+        // --- Interactive object tap/hold handling (user mode) ---
+        if (this._mode !== "edit" && interactiveObjectMap.size > 0 && pointerStart) {
+          const moved = Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5;
+          if (!moved) {
+            const rect = renderer.domElement.getBoundingClientRect();
+            pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+            raycaster.setFromCamera(pointer, camera);
+            const hits = raycaster.intersectObjects(pickableObjects, true);
+            for (const hit of hits) {
+              // Walk up to find if this mesh (or an ancestor mesh) is interactive
+              let obj = hit.object;
+              let entry = null;
+              while (obj) {
+                if (interactiveObjectMap.has(obj)) { entry = interactiveObjectMap.get(obj); break; }
+                obj = obj.parent;
+              }
+              if (entry) {
+                const elapsed = performance.now() - pointerStart.time;
+                const holdMs = Math.max(250, Number(this._config.marker_hold_ms) || 650);
+                const action = elapsed >= holdMs ? entry.holdAction : entry.tapAction;
+                this._runInteractiveObjectAction(action, entry.entity);
+                pointerStart = null;
+                return;
+              }
+            }
+          }
+        }
+
+        // --- Edit mode placement handling ---
         if (this._mode !== "edit" || (!this._pendingLightPath && !this._pendingSubSpot && !this._pendingDeviceKey && !(this._zoneDrawing && this._activeZoneId))) return;
         if (pointerStart && Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5) return;
         const rect = renderer.domElement.getBoundingClientRect();
@@ -5332,6 +5498,45 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         // OrbitControls.update() must be called every frame when damping is on;
         // it fires a 'change' event (→ needsRender = true) while still decelerating.
         controls.update();
+
+        // --- Update animated 3D objects ---
+        if (animatedObjects.length > 0) {
+          const animNow = performance.now();
+          const dt = Math.min((animNow - animLastTime) / 1000, 0.1); // clamp to avoid jumps after tab restore
+          animLastTime = animNow;
+          let anyAnimActive = false;
+          for (const anim of animatedObjects) {
+            const entityState = this._hass?.states?.[anim.entity]?.state;
+            const isActive = entityState === anim.stateOn;
+            if (!isActive) continue;
+            anyAnimActive = true;
+            const speed = anim.speed;
+            const axis = anim.axis;
+            if (anim.type === "rotate") {
+              const angle = speed * 2 * Math.PI * dt;
+              if (axis === "x") anim.mesh.rotation.x += angle;
+              else if (axis === "z") anim.mesh.rotation.z += angle;
+              else anim.mesh.rotation.y += angle;
+            } else if (anim.type === "oscillate") {
+              anim.phase += dt * speed * 2 * Math.PI;
+              const oscillation = Math.sin(anim.phase) * (anim.amplitude);
+              if (axis === "x") anim.mesh.rotation.x = oscillation;
+              else if (axis === "z") anim.mesh.rotation.z = oscillation;
+              else anim.mesh.rotation.y = oscillation;
+            } else if (anim.type === "bob") {
+              anim.phase += dt * speed * 2 * Math.PI;
+              const offset = Math.sin(anim.phase) * (anim.amplitude);
+              if (axis === "x") anim.mesh.position.x = anim.originalX + offset;
+              else if (axis === "z") anim.mesh.position.z = anim.originalZ + offset;
+              else anim.mesh.position.y = anim.originalY + offset;
+            }
+          }
+          if (anyAnimActive) needsRender = true;
+        }
+
+        // --- Update interactive object state styles ---
+        if (interactiveNameMap.size > 0 && applyInteractiveStyles()) needsRender = true;
+
         if (!needsRender) return;
         needsRender = false;
         this._captureModelCameraState();
@@ -5410,6 +5615,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         zoneGroup,
         modelBounds,
         pickableObjects,
+        animatedObjects,
+        interactiveObjectMap,
+        interactiveNameMap,
+        applyInteractiveStyles,
         surfaceRaycaster: new THREE.Raycaster(),
         offlineFocusDistance,
         animationFrame: 0,
@@ -5669,6 +5878,27 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _toggleEntity(entityId) {
     if (!entityId || !this._hass?.callService) return;
     this._hass.callService("homeassistant", "toggle", { entity_id: entityId });
+  }
+
+  _runInteractiveObjectAction(action, entityId) {
+    const normalized = action || "more-info";
+    if (normalized === "none") return;
+    if (normalized === "more-info") {
+      this._openMoreInfo(entityId);
+      return;
+    }
+    if (normalized === "toggle") {
+      this._toggleEntity(entityId);
+      return;
+    }
+    // Support call-service action: { action: "call-service", service: "...", data: {...} }
+    if (typeof normalized === "object" && normalized.action === "call-service" && normalized.service) {
+      const [domain, service] = normalized.service.split(".", 2);
+      if (domain && service && this._hass?.callService) {
+        this._hass.callService(domain, service, { entity_id: entityId, ...(normalized.data || {}) });
+      }
+      return;
+    }
   }
 
   _refresh3DMarkerOverlay() {

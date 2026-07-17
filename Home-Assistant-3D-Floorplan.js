@@ -10712,10 +10712,13 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
     super();
     this._config = {};
     this._markerYamlError = "";
+    this._objectConfigScope = "root";
   }
 
   setConfig(config) {
     this._config = { ...(config || {}) };
+    const scopeMatch = /^floor:(\d+)$/.exec(this._objectConfigScope || "");
+    if (scopeMatch && !this._config.floors?.[Number(scopeMatch[1])]) this._objectConfigScope = "root";
     this._render();
   }
 
@@ -10801,6 +10804,97 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
           font-size: 12px;
           font-weight: 700;
         }
+
+        .object-config-toolbar {
+          display: flex;
+          align-items: end;
+          justify-content: space-between;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .object-config-toolbar label {
+          min-width: min(100%, 240px);
+        }
+
+        .object-config-list {
+          display: grid;
+          gap: 10px;
+        }
+
+        .object-config-card {
+          display: grid;
+          gap: 10px;
+          padding: 10px;
+          border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.25));
+          border-radius: 7px;
+          background: var(--secondary-background-color, #f7f8fa);
+        }
+
+        .object-config-card header,
+        .state-style-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+
+        .object-config-card header strong {
+          font-size: 12px;
+        }
+
+        .object-config-card button,
+        .object-config-toolbar button,
+        .state-style-editor button {
+          width: auto;
+          border: 1px solid var(--primary-color, #03a9f4);
+          border-radius: 6px;
+          background: transparent;
+          color: var(--primary-color, #03a9f4);
+          cursor: pointer;
+          font: inherit;
+          font-size: 12px;
+          font-weight: 700;
+          padding: 6px 10px;
+        }
+
+        .object-config-card button[data-remove-object-item],
+        .state-style-row button {
+          border-color: var(--error-color, #db4437);
+          color: var(--error-color, #db4437);
+        }
+
+        .state-style-editor {
+          display: grid;
+          gap: 8px;
+          padding-top: 8px;
+          border-top: 1px solid var(--divider-color, rgba(127, 127, 127, 0.25));
+        }
+
+        .state-style-editor h4 {
+          margin: 0;
+          font-size: 12px;
+        }
+
+        .state-style-row {
+          display: grid;
+          grid-template-columns: minmax(100px, 1fr) minmax(100px, 1fr) minmax(85px, 0.7fr) auto;
+        }
+
+        .object-config-empty {
+          padding: 10px;
+          border: 1px dashed var(--divider-color, rgba(127, 127, 127, 0.35));
+          border-radius: 7px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          text-align: center;
+        }
+
+        @media (max-width: 600px) {
+          .state-style-row {
+            grid-template-columns: 1fr 1fr;
+          }
+        }
       </style>
       <div class="floorplan-editor">
         <section>
@@ -10871,8 +10965,26 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
         </section>
 
         <section>
+          <h3>Animated 3D Objects</h3>
+          ${this._renderObjectConfigToolbar("animation")}
+          <div class="editor-help">Animate named GLB objects while a Home Assistant entity matches the configured active state.</div>
+          <div class="object-config-list">
+            ${this._renderAnimationEditors()}
+          </div>
+        </section>
+
+        <section>
+          <h3>Interactive 3D Objects</h3>
+          ${this._renderObjectConfigToolbar("interactive")}
+          <div class="editor-help">Make named GLB objects clickable and optionally change their color or opacity with entity state.</div>
+          <div class="object-config-list">
+            ${this._renderInteractiveObjectEditors()}
+          </div>
+        </section>
+
+        <section>
           <h3>Import Config YAML</h3>
-          <div class="editor-help">Paste the full output of <strong>Copy YAML</strong> here. Applies markers, zones, presets, and ambient darkness all at once.</div>
+          <div class="editor-help">Paste the full output of <strong>Copy YAML</strong> here. Applies markers, zones, animations, interactive objects, presets, and ambient darkness all at once.</div>
           <textarea data-full-config-yaml spellcheck="false" placeholder="Paste exported YAML here…"></textarea>
           <button type="button" data-apply-full-config style="margin-top:6px;padding:5px 12px;border:1px solid var(--primary-color,#03a9f4);border-radius:6px;background:transparent;color:var(--primary-color,#03a9f4);cursor:pointer;font-size:12px;font-weight:700;">Apply</button>
           ${this._fullConfigError ? `<div class="editor-error">${this._escape(this._fullConfigError)}</div>` : ""}
@@ -10883,6 +10995,140 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
     this._attachEditorEvents();
   }
 
+  _renderObjectConfigToolbar(kind) {
+    const floors = Array.isArray(this._config.floors) ? this._config.floors : [];
+    const scopeOptions = [
+      `<option value="root" ${this._objectConfigScope === "root" ? "selected" : ""}>Card / single floor</option>`,
+      ...floors.map((floor, index) => {
+        const value = `floor:${index}`;
+        const label = floor.name || floor.id || `Floor ${index + 1}`;
+        return `<option value="${value}" ${this._objectConfigScope === value ? "selected" : ""}>${this._escape(label)}</option>`;
+      }),
+    ].join("");
+    const label = kind === "animation" ? "Animation" : "Interactive object";
+    return `
+      <div class="object-config-toolbar">
+        <label>
+          <span>Configuration scope</span>
+          <select data-object-config-scope>${scopeOptions}</select>
+        </label>
+        <button type="button" data-add-object-item="${kind}">Add ${label}</button>
+      </div>
+    `;
+  }
+
+  _objectConfigTarget(config = this._config) {
+    const match = /^floor:(\d+)$/.exec(this._objectConfigScope || "");
+    if (!match) return config;
+    const index = Number(match[1]);
+    return Array.isArray(config.floors) && config.floors[index] ? config.floors[index] : config;
+  }
+
+  _renderAnimationEditors() {
+    const animations = this._objectConfigTarget()?.animations;
+    if (!Array.isArray(animations) || !animations.length) {
+      return `<div class="object-config-empty">No animations configured for this scope.</div>`;
+    }
+    return animations.map((animation, index) => `
+      <article class="object-config-card">
+        <header>
+          <strong>Animation ${index + 1}${animation.object_name ? ` · ${this._escape(animation.object_name)}` : ""}</strong>
+          <button type="button" data-remove-object-item="animation" data-item-index="${index}">Remove</button>
+        </header>
+        <div class="editor-grid">
+          ${this._objectField("animation", index, "object_name", "GLB Object Name", animation.object_name, "CeilingFan")}
+          ${this._objectField("animation", index, "entity", "Entity", animation.entity, "fan.living_room")}
+          ${this._objectSelect("animation", index, "type", "Animation Type", animation.type || "rotate", [["rotate", "Rotate"], ["oscillate", "Oscillate"], ["bob", "Bob"]])}
+          ${this._objectSelect("animation", index, "axis", "Axis", animation.axis || "y", [["x", "X"], ["y", "Y"], ["z", "Z"]])}
+          ${this._objectField("animation", index, "speed", "Speed", animation.speed ?? 1, "1", "number", 'min="0" step="0.1"')}
+          ${this._objectField("animation", index, "state_on", "Active State", animation.state_on || "on", "on")}
+          ${this._objectField("animation", index, "amplitude", "Amplitude", animation.amplitude ?? 0.5, "0.5", "number", 'min="0" step="0.1"')}
+        </div>
+      </article>
+    `).join("");
+  }
+
+  _renderInteractiveObjectEditors() {
+    const objects = this._objectConfigTarget()?.interactive_objects;
+    if (!Array.isArray(objects) || !objects.length) {
+      return `<div class="object-config-empty">No interactive objects configured for this scope.</div>`;
+    }
+    return objects.map((object, index) => {
+      const tapAction = this._interactiveActionType(object.tap_action, "toggle");
+      const holdAction = this._interactiveActionType(object.hold_action, "more-info");
+      return `
+        <article class="object-config-card">
+          <header>
+            <strong>Interactive object ${index + 1}${object.object_name ? ` · ${this._escape(object.object_name)}` : ""}</strong>
+            <button type="button" data-remove-object-item="interactive" data-item-index="${index}">Remove</button>
+          </header>
+          <div class="editor-grid">
+            ${this._objectField("interactive", index, "object_name", "GLB Object Name", object.object_name, "CeilingFan")}
+            ${this._objectField("interactive", index, "entity", "Entity", object.entity, "fan.living_room")}
+            ${this._objectSelect("interactive", index, "tap_action", "Tap Action", tapAction, this._interactiveActionOptions())}
+            ${this._objectSelect("interactive", index, "hold_action", "Hold Action", holdAction, this._interactiveActionOptions())}
+          </div>
+          ${this._renderServiceActionFields(index, "tap_action", object.tap_action)}
+          ${this._renderServiceActionFields(index, "hold_action", object.hold_action)}
+          ${this._renderStateStyleEditor(index, object.state_styles)}
+        </article>
+      `;
+    }).join("");
+  }
+
+  _interactiveActionOptions() {
+    return [["toggle", "Toggle"], ["more-info", "More info"], ["none", "None"], ["call-service", "Call service"]];
+  }
+
+  _interactiveActionType(action, fallback) {
+    return action && typeof action === "object" && action.action === "call-service" ? "call-service" : (action || fallback);
+  }
+
+  _renderServiceActionFields(index, actionKey, action) {
+    if (this._interactiveActionType(action, "") !== "call-service") return "";
+    const data = action && typeof action === "object" && action.data ? JSON.stringify(action.data, null, 2) : "";
+    const label = actionKey === "tap_action" ? "Tap" : "Hold";
+    return `
+      <div class="editor-grid">
+        ${this._objectField("interactive", index, `${actionKey}.service`, `${label} Service`, action?.service, "light.turn_on")}
+        ${this._objectField("interactive", index, `${actionKey}.data`, `${label} Service Data (JSON)`, data, '{"brightness_pct": 50}', "text", "", "json")}
+      </div>
+    `;
+  }
+
+  _renderStateStyleEditor(index, stateStyles) {
+    const entries = stateStyles && typeof stateStyles === "object" ? Object.entries(stateStyles) : [];
+    return `
+      <div class="state-style-editor">
+        <h4>State styles</h4>
+        ${entries.map(([state, style], styleIndex) => `
+          <div class="state-style-row">
+            ${this._objectField("interactive", index, `state_styles.${styleIndex}.state`, "State", state, "on")}
+            ${this._objectField("interactive", index, `state_styles.${styleIndex}.color`, "Color", style?.color, "#81c784")}
+            ${this._objectField("interactive", index, `state_styles.${styleIndex}.opacity`, "Opacity", style?.opacity ?? "", "1", "number", 'min="0" max="1" step="0.05"')}
+            <button type="button" data-remove-state-style data-item-index="${index}" data-style-state="${this._escape(state)}">Remove</button>
+          </div>
+        `).join("")}
+        ${entries.length ? "" : `<div class="object-config-empty">No state styles configured.</div>`}
+        <button type="button" data-add-state-style data-item-index="${index}">Add state style</button>
+      </div>
+    `;
+  }
+
+  _objectField(kind, index, key, label, value = "", placeholder = "", type = "text", attributes = "", valueType = "") {
+    return this._field(
+      label,
+      `<input type="${this._escape(type)}" data-object-kind="${kind}" data-item-index="${index}" data-object-key="${this._escape(key)}" ${valueType ? `data-value-type="${valueType}"` : ""} value="${this._escape(value ?? "")}" placeholder="${this._escape(placeholder)}" ${attributes} />`
+    );
+  }
+
+  _objectSelect(kind, index, key, label, value, options) {
+    return this._field(
+      label,
+      `<select data-object-kind="${kind}" data-item-index="${index}" data-object-key="${this._escape(key)}">${options.map(([optionValue, optionLabel]) => `<option value="${this._escape(optionValue)}" ${String(value) === String(optionValue) ? "selected" : ""}>${this._escape(optionLabel)}</option>`).join("")}</select>`
+    );
+  }
+
   _attachEditorEvents() {
     this.querySelectorAll("[data-config-key]").forEach((element) => {
       const eventName = element.type === "checkbox" ? "change" : "change";
@@ -10891,6 +11137,27 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
     this.querySelector("[data-apply-full-config]")?.addEventListener("click", () => {
       const textarea = this.querySelector("[data-full-config-yaml]");
       if (textarea) this._handleFullConfigYaml(textarea.value);
+    });
+    this.querySelectorAll("[data-object-config-scope]").forEach((select) => {
+      select.addEventListener("change", (event) => {
+        this._objectConfigScope = event.currentTarget.value;
+        this._render();
+      });
+    });
+    this.querySelectorAll("[data-add-object-item]").forEach((button) => {
+      button.addEventListener("click", () => this._addObjectConfigItem(button.dataset.addObjectItem));
+    });
+    this.querySelectorAll("[data-remove-object-item]").forEach((button) => {
+      button.addEventListener("click", () => this._removeObjectConfigItem(button.dataset.removeObjectItem, Number(button.dataset.itemIndex)));
+    });
+    this.querySelectorAll("[data-object-kind][data-object-key]").forEach((input) => {
+      input.addEventListener("change", () => this._handleObjectConfigInput(input));
+    });
+    this.querySelectorAll("[data-add-state-style]").forEach((button) => {
+      button.addEventListener("click", () => this._addStateStyle(Number(button.dataset.itemIndex)));
+    });
+    this.querySelectorAll("[data-remove-state-style]").forEach((button) => {
+      button.addEventListener("click", () => this._removeStateStyle(Number(button.dataset.itemIndex), button.dataset.styleState));
     });
   }
 
@@ -10921,6 +11188,131 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
       this._cleanupEmptyObjects(nextConfig);
     }
     this._commitConfig(nextConfig);
+  }
+
+  _objectConfigArrayKey(kind) {
+    return kind === "animation" ? "animations" : "interactive_objects";
+  }
+
+  _addObjectConfigItem(kind) {
+    const nextConfig = JSON.parse(JSON.stringify(this._config || {}));
+    const target = this._objectConfigTarget(nextConfig);
+    const key = this._objectConfigArrayKey(kind);
+    if (!Array.isArray(target[key])) target[key] = [];
+    target[key].push(kind === "animation"
+      ? { object_name: "", entity: "", type: "rotate", axis: "y", speed: 1, state_on: "on", amplitude: 0.5 }
+      : { object_name: "", entity: "", tap_action: "toggle", hold_action: "more-info", state_styles: {} });
+    this._commitConfig(nextConfig);
+    this._render();
+  }
+
+  _removeObjectConfigItem(kind, index) {
+    const nextConfig = JSON.parse(JSON.stringify(this._config || {}));
+    const target = this._objectConfigTarget(nextConfig);
+    const key = this._objectConfigArrayKey(kind);
+    if (!Array.isArray(target[key]) || !target[key][index]) return;
+    target[key].splice(index, 1);
+    if (!target[key].length) delete target[key];
+    this._commitConfig(nextConfig);
+    this._render();
+  }
+
+  _handleObjectConfigInput(input) {
+    const kind = input.dataset.objectKind;
+    const index = Number(input.dataset.itemIndex);
+    const key = input.dataset.objectKey;
+    const nextConfig = JSON.parse(JSON.stringify(this._config || {}));
+    const target = this._objectConfigTarget(nextConfig);
+    const list = target[this._objectConfigArrayKey(kind)];
+    const item = Array.isArray(list) ? list[index] : null;
+    if (!item) return;
+
+    let value = input.value;
+    if (input.type === "number") {
+      value = value === "" ? null : Number(value);
+      if (value !== null && !Number.isFinite(value)) return;
+    }
+    if (input.dataset.valueType === "json") {
+      try {
+        value = value.trim() ? JSON.parse(value) : null;
+        input.setCustomValidity("");
+      } catch (_) {
+        input.setCustomValidity("Enter valid JSON.");
+        input.reportValidity();
+        return;
+      }
+    }
+
+    let rerender = false;
+    if (kind === "interactive" && (key === "tap_action" || key === "hold_action")) {
+      item[key] = value === "call-service" ? { action: "call-service", service: "" } : value;
+      rerender = true;
+    } else if (kind === "interactive" && /^(tap_action|hold_action)\.(service|data)$/.test(key)) {
+      const [, actionKey, property] = key.match(/^(tap_action|hold_action)\.(service|data)$/);
+      if (!item[actionKey] || typeof item[actionKey] !== "object") item[actionKey] = { action: "call-service", service: "" };
+      if (value === null || value === "") delete item[actionKey][property];
+      else item[actionKey][property] = value;
+    } else if (kind === "interactive" && key.startsWith("state_styles.")) {
+      const [, styleIndexText, property] = key.split(".");
+      const entries = Object.entries(item.state_styles || {});
+      const styleIndex = Number(styleIndexText);
+      const [oldState, oldStyle = {}] = entries[styleIndex] || [];
+      if (oldState === undefined) return;
+      if (property === "state") {
+        const nextState = String(value || "").trim();
+        if (!nextState) {
+          input.setCustomValidity("State is required.");
+          input.reportValidity();
+          return;
+        }
+        const rebuilt = {};
+        entries.forEach(([state, style], entryIndex) => {
+          rebuilt[entryIndex === styleIndex ? nextState : state] = style;
+        });
+        item.state_styles = rebuilt;
+        rerender = true;
+      } else {
+        const nextStyle = { ...oldStyle };
+        if (value === null || value === "") delete nextStyle[property];
+        else nextStyle[property] = value;
+        item.state_styles[oldState] = nextStyle;
+      }
+    } else if (value === null || value === "") {
+      delete item[key];
+    } else {
+      item[key] = value;
+    }
+
+    this._commitConfig(nextConfig);
+    if (rerender) this._render();
+  }
+
+  _addStateStyle(index) {
+    const nextConfig = JSON.parse(JSON.stringify(this._config || {}));
+    const target = this._objectConfigTarget(nextConfig);
+    const item = target.interactive_objects?.[index];
+    if (!item) return;
+    if (!item.state_styles || typeof item.state_styles !== "object") item.state_styles = {};
+    let state = "on";
+    let suffix = 2;
+    while (Object.prototype.hasOwnProperty.call(item.state_styles, state)) {
+      state = `state_${suffix}`;
+      suffix += 1;
+    }
+    item.state_styles[state] = { color: "#81c784" };
+    this._commitConfig(nextConfig);
+    this._render();
+  }
+
+  _removeStateStyle(index, state) {
+    const nextConfig = JSON.parse(JSON.stringify(this._config || {}));
+    const target = this._objectConfigTarget(nextConfig);
+    const item = target.interactive_objects?.[index];
+    if (!item?.state_styles || !Object.prototype.hasOwnProperty.call(item.state_styles, state)) return;
+    delete item.state_styles[state];
+    if (!Object.keys(item.state_styles).length) delete item.state_styles;
+    this._commitConfig(nextConfig);
+    this._render();
   }
 
   _handleMarkersYaml(value) {
@@ -10954,7 +11346,7 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
           this._fullConfigSuccess = `Applied: ${sections.join(", ")}`;
         },
       });
-      if (!applied.length) throw new Error("No recognised sections found. Expected markers:, brightness_zones:, etc.");
+      if (!applied.length) throw new Error("No recognised sections found. Expected markers:, animations:, interactive_objects:, brightness_zones:, etc.");
       this._render();
     } catch (err) {
       this._fullConfigError = err?.message || "Invalid YAML.";
@@ -11000,6 +11392,8 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
       "obj_loader_urls",
       "orbit_controls_url",
       "orbit_controls_urls",
+      "animations",
+      "interactive_objects",
     ];
 
     directKeys.forEach((key) => {

@@ -374,6 +374,8 @@ Use matching files from Three.js release `0.165.0`.
 
 Animate mesh objects in your GLB model based on Home Assistant entity state. Name your objects in Blender (or your 3D editor), then reference them by name in the card config.
 
+These settings can be managed from the Home Assistant visual card editor under **Animated 3D Objects**. Use **Configuration scope** to edit a single-floor card or a specific floor in a multi-floor card.
+
 ### Configuration
 
 Add an `animations` array at the top level (single-floor) or inside each floor entry (multi-floor):
@@ -447,6 +449,8 @@ If your HA instance has no internet access, use the bundled offline approach (`t
 ## Interactive 3D Objects
 
 Bind named meshes in your GLB model directly to Home Assistant entities. Clicking/tapping the 3D object fires an action (toggle, more-info, call-service), and the object's appearance can change based on entity state.
+
+The visual card editor provides repeatable interactive-object and state-style controls, including tap/hold service actions. Use **Configuration scope** to edit a single-floor card or a specific floor in a multi-floor card.
 
 ### Configuration
 

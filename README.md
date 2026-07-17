@@ -331,6 +331,173 @@ orbit_controls_url: /local/vendor/three/OrbitControls.js
 
 Use matching files from Three.js release `0.165.0`.
 
+## Animated 3D Objects
+
+Animate mesh objects in your GLB model based on Home Assistant entity state. Name your objects in Blender (or your 3D editor), then reference them by name in the card config.
+
+### Configuration
+
+Add an `animations` array at the top level (single-floor) or inside each floor entry (multi-floor):
+
+```yaml
+type: custom:home-assistant-3d-floorplan
+title: 3D Floorplan
+model: /local/floorplans/home.glb
+animations:
+  - object_name: "CeilingFan"
+    entity: fan.kitchen_ventilador_cocina
+    type: rotate
+    axis: y
+    speed: 2.0
+  - object_name: "Pump_PB"
+    entity: binary_sensor.hcc_planta_baja_pump
+    type: rotate
+    axis: z
+    speed: 1.0
+```
+
+Multi-floor example:
+
+```yaml
+floors:
+  - id: ground
+    name: Ground Floor
+    model: /local/floorplans/ground.glb
+    animations:
+      - object_name: "WaterValve"
+        entity: switch.water_valve
+        type: oscillate
+        axis: z
+        speed: 0.5
+        amplitude: 0.8
+```
+
+### Parameters
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `object_name` | Yes | — | Name of the mesh/object in the GLB file (as named in Blender) |
+| `entity` | Yes | — | Home Assistant entity ID that controls the animation |
+| `type` | No | `rotate` | Animation type: `rotate`, `oscillate`, or `bob` |
+| `axis` | No | `y` | Rotation/movement axis: `x`, `y`, or `z` |
+| `speed` | No | `1.0` | Speed multiplier (rotations/cycles per second) |
+| `state_on` | No | `"on"` | Entity state value that triggers the animation |
+| `amplitude` | No | `0.5` | For `oscillate`: max rotation in radians. For `bob`: max displacement in model units |
+
+### Animation Types
+
+- **`rotate`** — Continuous rotation around the specified axis. Good for fans, turbines, pumps.
+- **`oscillate`** — Rocks back and forth around the axis. Good for valves, pendulums, indicators.
+- **`bob`** — Moves up and down (or along the specified axis). Good for floating indicators or pistons.
+
+### Tips
+
+- The object name in the config must match the object name in your 3D file exactly (case-sensitive).
+- Set the object's origin point in Blender to the desired center of rotation before exporting.
+- For fans, place the origin at the center of the fan blades and use `type: rotate` with `axis: y`.
+- Animations only run when the entity state matches `state_on`. When the state changes to anything else, the object stops in its current position.
+- Multiple animations can target different objects in the same model.
+- **Geometry centering**: The card automatically centers each animated mesh's geometry around its local origin before animating. This ensures rotation happens in-place even for models exported from Sweet Home 3D or other tools that bake world-space vertex positions.
+
+### Note on Three.js Loading
+
+The card loads Three.js from `esm.sh` by default, which rewrites bare import specifiers internally. This avoids the problem where `jsdelivr.net` CDN links for Three.js addons (GLTFLoader, OrbitControls) use bare `import "three"` specifiers that fail without a browser import map.
+
+If your HA instance has no internet access, use the bundled offline approach (`three_bundle_url`) described in the installation section above.
+
+## Interactive 3D Objects
+
+Bind named meshes in your GLB model directly to Home Assistant entities. Clicking/tapping the 3D object fires an action (toggle, more-info, call-service), and the object's appearance can change based on entity state.
+
+### Configuration
+
+Add an `interactive_objects` array at the top level or inside each floor:
+
+```yaml
+interactive_objects:
+  - object_name: "CeilingFan"
+    entity: fan.kitchen_ventilador_cocina
+    tap_action: toggle
+    hold_action: more-info
+    state_styles:
+      "on":
+        color: "#81c784"
+      "off":
+        color: "#5f6570"
+        opacity: 0.6
+  - object_name: "GarageDoor"
+    entity: cover.garage_door
+    tap_action: more-info
+```
+
+### Parameters
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `object_name` | Yes | — | Name of the mesh/object in the GLB file |
+| `entity` | Yes | — | Home Assistant entity ID |
+| `tap_action` | No | `toggle` | Action on tap: `toggle`, `more-info`, `none`, or a call-service object |
+| `hold_action` | No | `more-info` | Action on long press (650ms): `toggle`, `more-info`, `none`, or a call-service object |
+| `state_styles` | No | — | Object mapping entity state values to visual styles |
+
+### State Styles
+
+Each key under `state_styles` is an entity state value. Supported style properties:
+
+| Property | Description |
+|----------|-------------|
+| `color` | Hex color string to tint the object material (e.g. `"#ff0000"`) |
+| `opacity` | Number 0–1, makes the object semi-transparent |
+
+When the entity state changes to a value not listed in `state_styles`, the object reverts to its original material.
+
+### Call-Service Action
+
+For custom actions beyond toggle/more-info:
+
+```yaml
+interactive_objects:
+  - object_name: "Thermostat"
+    entity: climate.living_room
+    tap_action:
+      action: call-service
+      service: climate.set_temperature
+      data:
+        temperature: 22
+```
+
+### Combining with Animations
+
+An object can be both interactive AND animated. Use the same `object_name` in both arrays:
+
+```yaml
+animations:
+  - object_name: "CeilingFan"
+    entity: fan.kitchen
+    type: rotate
+    axis: y
+    speed: 3.0
+
+interactive_objects:
+  - object_name: "CeilingFan"
+    entity: fan.kitchen
+    tap_action: toggle
+    state_styles:
+      "on":
+        color: "#81c784"
+      "off":
+        color: "#5f6570"
+```
+
+This makes the fan spin when on AND lets you tap it to toggle, with a color tint indicating state.
+
+### Tips
+
+- The cursor changes to a pointer when hovering over interactive objects.
+- Hold gesture uses the same duration as markers (`marker_hold_ms`, default 650ms).
+- If the named object is a group/empty in Blender, all child meshes become clickable.
+- State styles clone materials internally so shared materials on other objects are not affected.
+
 ## Performance Notes
 
 - Use `.glb` format - single file, browser-optimised, carries geometry, materials, and textures together

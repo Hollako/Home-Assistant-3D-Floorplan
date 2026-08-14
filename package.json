@@ -1,6 +1,6 @@
 {
   "name": "home-assistant-3d-floorplan",
-  "version": "2.10.0",
+  "version": "2.11.0",
   "description": "![Home Assistant 3D Floorplan preview](images/preview.png)",
   "main": "Home-Assistant-3D-Floorplan.js",
   "scripts": {

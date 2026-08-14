@@ -1,4 +1,4 @@
-﻿const VERSION = "2.10.0";
+﻿const VERSION = "2.11.0";
 class HomeAssistant3DFloorplan extends HTMLElement {
   static getConfigElement() {
     return document.createElement("home-assistant-3d-floorplan-editor");

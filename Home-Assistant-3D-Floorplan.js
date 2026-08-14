@@ -653,6 +653,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         markerDisplay: this._normalizeMarkerDisplay(marker.marker_display || marker.markerDisplay),
         tapAction: this._normalizeMarkerAction(marker.tap_action || marker.tapAction, "tap"),
         holdAction: this._normalizeMarkerAction(marker.hold_action || marker.holdAction, "hold"),
+        navigationPath: this._normalizeNavigationPath(marker.navigation_path || marker.navigationPath),
         lightIntensity: this._normalizeLightIntensity(marker.light_intensity ?? marker.lightIntensity),
         lightType: this._normalizeLightType(marker.light_type ?? marker.lightType),
         lightRadius: this._normalizeLightRadius(marker.light_radius ?? marker.lightRadius),
@@ -691,6 +692,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         markerDisplay: this._normalizeMarkerDisplay(marker.markerDisplay || marker.marker_display),
         tapAction: this._normalizeMarkerAction(marker.tapAction || marker.tap_action, "tap"),
         holdAction: this._normalizeMarkerAction(marker.holdAction || marker.hold_action, "hold"),
+        navigationPath: this._normalizeNavigationPath(marker.navigationPath || marker.navigation_path),
         lightIntensity: this._normalizeLightIntensity(marker.lightIntensity ?? marker.light_intensity),
         lightType: this._normalizeLightType(marker.lightType ?? marker.light_type),
         lightRadius: this._normalizeLightRadius(marker.lightRadius ?? marker.light_radius),
@@ -3768,6 +3770,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const base = [
       ["toggle", "Toggle"],
       ["more-info", "More info"],
+      ["navigate", "Navigate"],
       ["none", "None"],
     ];
     if (type === "hold") {
@@ -4758,6 +4761,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     ...(marker.markerDisplay ? [`        marker_display: ${marker.markerDisplay}`] : []),
                     `        tap_action: ${marker.tapAction}`,
                     `        hold_action: ${marker.holdAction}`,
+                    ...(marker.navigationPath ? [`        navigation_path: ${marker.navigationPath}`] : []),
                     ...(marker.lightIntensity !== "" ? [`        light_intensity: ${marker.lightIntensity}`] : []),
                     ...(marker.lightType ? [`        light_type: ${this._threeLightTypeName(marker.lightType)}`, `        light_radius: ${marker.lightRadius || 1.5}`] : []),
                     ...(marker.lightPreset ? [`        light_preset: ${marker.lightPreset}`] : []),
@@ -4827,6 +4831,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               ...(marker.markerDisplay ? [`    marker_display: ${marker.markerDisplay}`] : []),
               `    tap_action: ${marker.tapAction}`,
               `    hold_action: ${marker.holdAction}`,
+              ...(marker.navigationPath ? [`    navigation_path: ${marker.navigationPath}`] : []),
               ...(marker.lightIntensity !== "" ? [`    light_intensity: ${marker.lightIntensity}`] : []),
               ...(marker.lightType ? [`    light_type: ${this._threeLightTypeName(marker.lightType)}`, `    light_radius: ${marker.lightRadius || 1.5}`] : []),
               ...(marker.lightPreset ? [`    light_preset: ${marker.lightPreset}`] : []),
@@ -4943,6 +4948,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           markerDisplay: this._normalizeMarkerDisplay(marker.markerDisplay || marker.marker_display),
           tapAction: this._exportMarkerAction(row, marker, "tap"),
           holdAction: this._exportMarkerAction(row, marker, "hold"),
+          navigationPath: this._normalizeNavigationPath(marker.navigationPath || marker.navigation_path),
           lightIntensity: row?.primaryDomain === "light" || hasCustomLightIntensity ? this._normalizeLightIntensity(marker.lightIntensity) : "",
           lightType: this._normalizeLightType(marker.lightType),
           lightRadius: this._normalizeLightRadius(marker.lightRadius),
@@ -5289,6 +5295,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
           entity: iObj.entity,
           tapAction: iObj.tap_action || "toggle",
           holdAction: iObj.hold_action || "more-info",
+          navigationPath: this._normalizeNavigationPath(iObj.navigation_path || iObj.navigationPath),
           stateStyles: iObj.state_styles || {},
           originalMaterials,
           lastAppliedState: null,
@@ -5422,7 +5429,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                 const elapsed = performance.now() - pointerStart.time;
                 const holdMs = Math.max(250, Number(this._config.marker_hold_ms) || 650);
                 const action = elapsed >= holdMs ? entry.holdAction : entry.tapAction;
-                this._runInteractiveObjectAction(action, entry.entity);
+                this._runInteractiveObjectAction(action, entry.entity, entry.navigationPath);
                 pointerStart = null;
                 return;
               }
@@ -5853,6 +5860,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       this._toggleEntity(row.entityId);
       return;
     }
+    if (normalizedAction === "navigate") {
+      this._navigate(this._markers?.[row.key]?.navigationPath || row.navigationPath);
+      return;
+    }
     if (normalizedAction === "select") {
       this._selectedMarkers.clear();
       this._selectedMarkers.add(row.key);
@@ -5868,6 +5879,23 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     }
   }
 
+  _normalizeNavigationPath(value) {
+    return String(value ?? "").trim();
+  }
+
+  _navigate(path) {
+    const target = this._normalizeNavigationPath(path);
+    if (!target) return false;
+    if (target.startsWith("#")) {
+      // Hash targets drive pop-up cards (e.g. Bubble Card) without a route change.
+      window.location.hash = target.slice(1);
+    } else {
+      window.history.pushState(null, "", target);
+    }
+    window.dispatchEvent(new Event("location-changed", { bubbles: true, composed: true }));
+    return true;
+  }
+
   _openMoreInfo(entityId) {
     if (!entityId) return;
     const moreInfoEvent = new Event("hass-more-info", { bubbles: true, composed: true });
@@ -5880,7 +5908,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     this._hass.callService("homeassistant", "toggle", { entity_id: entityId });
   }
 
-  _runInteractiveObjectAction(action, entityId) {
+  _runInteractiveObjectAction(action, entityId, navigationPath) {
     const normalized = action || "more-info";
     if (normalized === "none") return;
     if (normalized === "more-info") {
@@ -5889,6 +5917,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     }
     if (normalized === "toggle") {
       this._toggleEntity(entityId);
+      return;
+    }
+    if (normalized === "navigate") {
+      this._navigate(navigationPath);
+      return;
+    }
+    if (typeof normalized === "object" && normalized.action === "navigate") {
+      this._navigate(normalized.navigation_path || normalized.navigationPath);
       return;
     }
     // Support call-service action: { action: "call-service", service: "...", data: {...} }
@@ -11685,6 +11721,7 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
       ["auto", "Auto"],
       ["toggle", "Toggle"],
       ["more-info", "More info"],
+      ["navigate", "Navigate"],
       ["none", "None"],
     ];
     return type === "hold" ? [...options, ["move", "Move"], ["select", "Select"]] : options;

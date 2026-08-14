@@ -208,6 +208,36 @@ test("navigation_path is written back out to YAML", () => {
   assert.equal(exported.navigationPath, "#kitchen");
 });
 
+test("hash navigation_path is quoted in final YAML output", () => {
+  const card = makeCard({
+    _activeFloorId: "ground",
+    _floorMarkers: {},
+    _markers: {
+      "light.kitchen": { entityId: "light.kitchen", x: 1, y: 2, navigationPath: "#kitchen" },
+    },
+    _modelDefaultViews: {},
+    _yamlPerformanceSettings: () => [],
+    _yamlAmbientDarkness: () => [],
+    _yamlDefaultView: () => [],
+    _hasMultipleFloors: () => false,
+    _yamlZonesForFloor: () => [],
+    _yamlLightPresets: () => [],
+  });
+  const rows = [{ key: "light.kitchen", entityId: "light.kitchen", name: "Kitchen", primaryDomain: "light" }];
+  assert.match(card._yamlExport(rows), /navigation_path: "#kitchen"/);
+});
+
+test("interactive object editor offers navigate and its path field", () => {
+  const editor = Object.create(Editor.prototype);
+  editor._config = {
+    interactive_objects: [{ object_name: "Door", tap_action: "navigate", navigation_path: "#entry" }],
+  };
+  assert.ok(editor._interactiveActionOptions().some(([value]) => value === "navigate"));
+  const html = editor._renderInteractiveObjectEditors();
+  assert.match(html, /data-object-key="navigation_path"/);
+  assert.match(html, /value="#entry"/);
+});
+
 test("re-tapping the same marker fires no second hashchange (known Bubble caveat)", () => {
   reset();
   const card = makeCard({ _markers: { "light.a": { navigationPath: "#kitchen" } } });

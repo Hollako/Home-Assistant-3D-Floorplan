@@ -4761,7 +4761,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     ...(marker.markerDisplay ? [`        marker_display: ${marker.markerDisplay}`] : []),
                     `        tap_action: ${marker.tapAction}`,
                     `        hold_action: ${marker.holdAction}`,
-                    ...(marker.navigationPath ? [`        navigation_path: ${marker.navigationPath}`] : []),
+                    ...(marker.navigationPath ? [`        navigation_path: ${JSON.stringify(marker.navigationPath)}`] : []),
                     ...(marker.lightIntensity !== "" ? [`        light_intensity: ${marker.lightIntensity}`] : []),
                     ...(marker.lightType ? [`        light_type: ${this._threeLightTypeName(marker.lightType)}`, `        light_radius: ${marker.lightRadius || 1.5}`] : []),
                     ...(marker.lightPreset ? [`        light_preset: ${marker.lightPreset}`] : []),
@@ -4831,7 +4831,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               ...(marker.markerDisplay ? [`    marker_display: ${marker.markerDisplay}`] : []),
               `    tap_action: ${marker.tapAction}`,
               `    hold_action: ${marker.holdAction}`,
-              ...(marker.navigationPath ? [`    navigation_path: ${marker.navigationPath}`] : []),
+              ...(marker.navigationPath ? [`    navigation_path: ${JSON.stringify(marker.navigationPath)}`] : []),
               ...(marker.lightIntensity !== "" ? [`    light_intensity: ${marker.lightIntensity}`] : []),
               ...(marker.lightType ? [`    light_type: ${this._threeLightTypeName(marker.lightType)}`, `    light_radius: ${marker.lightRadius || 1.5}`] : []),
               ...(marker.lightPreset ? [`    light_preset: ${marker.lightPreset}`] : []),
@@ -11103,6 +11103,9 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
             ${this._objectField("interactive", index, "entity", "Entity", object.entity, "fan.living_room")}
             ${this._objectSelect("interactive", index, "tap_action", "Tap Action", tapAction, this._interactiveActionOptions())}
             ${this._objectSelect("interactive", index, "hold_action", "Hold Action", holdAction, this._interactiveActionOptions())}
+            ${(tapAction === "navigate" || holdAction === "navigate")
+              ? this._objectField("interactive", index, "navigation_path", "Navigation Path", object.navigation_path || object.navigationPath, "#living-room or /lovelace/room")
+              : ""}
           </div>
           ${this._renderServiceActionFields(index, "tap_action", object.tap_action)}
           ${this._renderServiceActionFields(index, "hold_action", object.hold_action)}
@@ -11113,11 +11116,11 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
   }
 
   _interactiveActionOptions() {
-    return [["toggle", "Toggle"], ["more-info", "More info"], ["none", "None"], ["call-service", "Call service"]];
+    return [["toggle", "Toggle"], ["more-info", "More info"], ["navigate", "Navigate"], ["none", "None"], ["call-service", "Call service"]];
   }
 
   _interactiveActionType(action, fallback) {
-    return action && typeof action === "object" && action.action === "call-service" ? "call-service" : (action || fallback);
+    return action && typeof action === "object" ? (action.action || fallback) : (action || fallback);
   }
 
   _renderServiceActionFields(index, actionKey, action) {

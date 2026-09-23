@@ -1,4 +1,4 @@
-﻿const VERSION = "2.11.0";
+﻿const VERSION = "2.12.0";
 class HomeAssistant3DFloorplan extends HTMLElement {
   static getConfigElement() {
     return document.createElement("home-assistant-3d-floorplan-editor");
@@ -928,10 +928,12 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _zonesFromList(zonesList) {
     return (zonesList || []).reduce((zones, zone, index) => {
       const id = this._zoneId(zone.id || zone.name || `area-${index + 1}`, zones);
+      const elevation = this._zoneElevation(zone);
       zones[id] = {
         id,
         name: zone.name || `Area ${index + 1}`,
         color: zone.color || "#f8d66d",
+        elevation,
         height: this._zoneHeight(zone),
         dayOpacity: this._zoneOpacityValue(zone.day_opacity ?? zone.dayOpacity, 0.5),
         nightOpacity: this._zoneOpacityValue(zone.night_opacity ?? zone.nightOpacity, 1),
@@ -939,7 +941,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         illuminanceEntity: zone.illuminance_entity || zone.illuminanceEntity || zone.illuminance?.entity || "",
         showLux: zone.show_lux === true || zone.showLux === true || zone.illuminance?.show_lux === true,
         lightingMode: zone.lighting_mode || zone.lightingMode || "area",
-        points: (zone.points || []).map((point) => this._zoneDisplayPointToModel(point)).filter((point) => this._isSafeModelPoint(point)),
+        points: (zone.points || []).map((point) => this._zoneDisplayPointToModel(point, elevation)).filter((point) => this._isSafeModelPoint(point)),
       };
       return zones;
     }, {});
@@ -1181,17 +1183,19 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _normalizedZones(zones) {
     return Object.entries(zones || {}).reduce((result, [key, zone], index) => {
       const id = this._zoneId(zone.id || key || `area-${index + 1}`, result);
+      const elevation = this._zoneElevation(zone);
       const points = (zone.points || [])
         .map((point) => {
           const modelPoint = this._normalizeModelPoint(point);
           if (!modelPoint) return null;
-          return this._zoneDisplayPointToModel(this._modelToDisplayPoint(modelPoint));
+          return this._zoneDisplayPointToModel(this._modelToDisplayPoint(modelPoint), elevation);
         })
         .filter(Boolean);
       result[id] = {
         id,
         name: zone.name || `Area ${index + 1}`,
         color: zone.color || "#f8d66d",
+        elevation,
         height: this._zoneHeight(zone),
         dayOpacity: this._zoneOpacityValue(zone.dayOpacity ?? zone.day_opacity, 0.5),
         nightOpacity: this._zoneOpacityValue(zone.nightOpacity ?? zone.night_opacity, 1),
@@ -1216,11 +1220,20 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _zoneHeight(zone = {}) {
     const direct = Number(zone.height);
     if (Number.isFinite(direct)) return Number(direct.toFixed(4));
+    return 0;
+  }
+
+  _zoneElevation(zone = {}) {
+    const raw = zone.elevation ?? zone.floor_elevation ?? zone.floorElevation;
+    if (raw !== null && raw !== "") {
+      const direct = Number(raw);
+      if (Number.isFinite(direct)) return Number(direct.toFixed(4));
+    }
     const firstPoint = (zone.points || [])[0];
-    if (firstPoint) {
-      const displayPoint = ["x", "y", "z"].every((axis) => Number.isFinite(Number(firstPoint?.[axis]))) ? firstPoint : this._modelToDisplayPoint(firstPoint);
-      const height = Number(displayPoint[this._verticalAxis()]);
-      if (Number.isFinite(height)) return Number(height.toFixed(4));
+    if (firstPoint && ["x", "y", "z"].every((axis) => Number.isFinite(Number(firstPoint?.[axis])))) {
+      const displayPoint = this._modelToDisplayPoint(firstPoint);
+      const elevation = Number(displayPoint[this._verticalAxis()]);
+      if (Number.isFinite(elevation)) return Number(elevation.toFixed(4));
     }
     return 0;
   }
@@ -1238,9 +1251,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return this._zoneHeight(zone);
   }
 
-  _zoneDisplayPointToModel(point) {
-    // Keep all floor-plane axes; zero out only the vertical axis so zone points
-    // stay on the floor regardless of where the user clicked in 3D space.
+  _zoneDisplayPointToModel(point, elevation = 0) {
+    // Keep all floor-plane axes and place every point on the zone's configured
+    // floor elevation regardless of where the user clicked in 3D space.
     const displayPoint = { x: 0, y: 0, z: 0 };
     const floorAxes = this._floorAxes();
     const hasFullDisplayPoint = ["x", "y", "z"].every((axis) => Number.isFinite(Number(point?.[axis])));
@@ -1252,7 +1265,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       displayPoint[floorAxes[0]] = Number(point?.x);
       displayPoint[floorAxes[1]] = Number(point?.[floorAxes[1]] ?? point?.y);
     }
-    displayPoint[this._verticalAxis()] = 0;
+    const floorElevation = Number(elevation);
+    displayPoint[this._verticalAxis()] = Number.isFinite(floorElevation) ? floorElevation : 0;
     return this._displayToModelPoint(displayPoint);
   }
 
@@ -2758,6 +2772,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         <input data-zone-color="${this._escape(activeZone.id)}" type="color" value="${this._escape(activeZone.color || "#f8d66d")}" />
       </label>
       <label>
+        <span>Floor elevation</span>
+        <input data-zone-elevation="${this._escape(activeZone.id)}" type="number" step="0.01" value="${this._escape(this._formatCoordinate(this._zoneElevation(activeZone)))}" />
+      </label>
+      <label>
         <span>Height</span>
         <input data-zone-height="${this._escape(activeZone.id)}" type="number" step="0.01" value="${this._escape(this._formatCoordinate(this._zoneHeight(activeZone)))}" />
       </label>
@@ -2941,9 +2959,21 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         const height = Number(event.currentTarget.value);
         if (!Number.isFinite(height)) return;
         zone.height = Number(height.toFixed(4));
+        this._saveZones();
+        this._refreshZoneTools();
+        this._refresh3DZoneOverlay();
+      });
+    });
+    root?.querySelectorAll("[data-zone-elevation]").forEach((element) => {
+      element.addEventListener("change", (event) => {
+        const zone = this._zones[event.currentTarget.dataset.zoneElevation];
+        if (!zone) return;
+        const elevation = Number(event.currentTarget.value);
+        if (!Number.isFinite(elevation)) return;
+        zone.elevation = Number(elevation.toFixed(4));
         zone.points = (zone.points || []).map((point) => {
           const displayPoint = this._modelToDisplayPoint(point);
-          return this._zoneDisplayPointToModel(displayPoint);
+          return this._zoneDisplayPointToModel(displayPoint, zone.elevation);
         });
         this._saveZones();
         this._refreshZoneTools();
@@ -3070,6 +3100,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       id,
       name,
       color: "#f8d66d",
+      elevation: null,
       height: 0,
       dayOpacity: 0.5,
       nightOpacity: 1,
@@ -3123,7 +3154,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     if (!Number.isFinite(number)) return;
     const displayPoint = this._modelToDisplayPoint(zone.points[index]);
     displayPoint[axis] = Math.round(number);
-    zone.points[index] = this._zoneDisplayPointToModel(displayPoint);
+    zone.points[index] = this._zoneDisplayPointToModel(displayPoint, this._zoneElevation(zone));
     this._activeZoneId = zoneId;
     this._activeZonePointIndex = index;
     this._saveZones();
@@ -3592,6 +3623,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       tilt_y:             { desc: "Tilts the light up/down. Affects wall cone angle and floor offset.",  effective: "Spot, Linear, Cove" },
       width:              { desc: "Width of the rectangular light source (model units).",                effective: "Linear, Cove - ignored by Spot, Lamp" },
       height:             { desc: "Height of the rectangular light source. Affects emission spread.",    effective: "Linear, Cove - ignored by Spot, Lamp" },
+      floor_glow_offset:  { desc: "Raises the simulated floor glow above the zone floor.",                effective: "Spot, Lamp only" },
       floor_hotspot_size: { desc: "Size of the bright core of the floor pool relative to main pool.",   effective: "Spot, Lamp - minimal effect on Cove (no hotspot)" },
       floor_saturation:   { desc: "Color saturation of the floor pool glow. 0 = grey, 1.5 = vivid.",   effective: "All types" },
       floor_outer_size:   { desc: "Radius of the wide ambient scatter layer around the floor pool.",    effective: "Spot, Lamp - less relevant for Cove/Linear" },
@@ -3649,6 +3681,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         ? `${slider("tilt_x", "Tilt X", -60, 60, 1, rp.tilt_x ?? 0)}
            ${slider("tilt_y", "Tilt Y", -90, 90, 1, rp.tilt_y ?? 0)}`
         : "";
+    const glowSurface = lightType === "spot" || lightType === "lamp"
+      ? slider("floor_glow_offset", "Glow surface height", 0, 2000, 1, rp.floor_glow_offset ?? 0)
+      : "";
 
     return `
       ${section("Core", `
@@ -3660,6 +3695,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         ${spotShape}${rectShape}${orientation}
       `) : ""}
       ${section("Floor Pool", `
+        ${glowSurface}
         ${slider("floor_hotspot_size",    "Hotspot size",   0.05, 1.2, 0.05, rp.floor_hotspot_size)}
         ${slider("floor_saturation",      "Saturation",     0,    1.5, 0.05, rp.floor_saturation)}
         ${slider("floor_outer_size",      "Outer size",     1.05, 5,   0.1,  rp.floor_outer_size ?? 2.2)}
@@ -3874,6 +3910,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         decay: 2,
         angle: 0.95,
         penumbra: 0.45,
+        floor_glow_offset: 0,
         floor_hotspot_size: 0.46,
         floor_saturation: 0.72,
         wall_intensity_scale: 0.82,
@@ -3914,6 +3951,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         intensity: 1.0,
         distance: 90,
         decay: 2,
+        floor_glow_offset: 0,
         floor_hotspot_size: 0.34,
         floor_saturation: 0.82,
         wall_intensity_scale: 0.7,
@@ -3943,6 +3981,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     )));
     migrated.width = Math.max(1, number(migrated.width, number(migrated.floor_elongation, 3.5) * 40));
     migrated.height = Math.max(1, number(migrated.height, 8));
+    migrated.floor_glow_offset = Math.max(0, Math.min(2000, number(migrated.floor_glow_offset, 0)));
     migrated.floor_hotspot_size = Math.max(0.05, Math.min(1.2, number(migrated.floor_hotspot_size, number(migrated.floor_core_size, 0.4))));
     migrated.floor_saturation = Math.max(0, Math.min(1.5, number(migrated.floor_saturation, 0.8)));
     migrated.wall_intensity_scale = Math.max(0, Math.min(3, number(migrated.wall_intensity_scale, number(migrated.wall_peak, 1))));
@@ -3980,6 +4019,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       "intensity", "distance", "decay",
       "width", "height",
       "angle", "penumbra", "tilt_x", "tilt_y",
+      "floor_glow_offset",
       "floor_hotspot_size", "floor_saturation",
       "floor_outer_size", "floor_outer_brightness",
       "gi_brightness", "gi_radius", "gi_warmth",
@@ -4795,6 +4835,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
                     `      - id: ${zone.id}`,
                     `        name: ${zone.name}`,
                     `        color: "${zone.color}"`,
+                    `        elevation: ${zone.elevation}`,
                     `        height: ${zone.height}`,
                     `        day_opacity: ${zone.dayOpacity}`,
                     `        night_opacity: ${zone.nightOpacity}`,
@@ -4867,6 +4908,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               `  - id: ${zone.id}`,
               `    name: ${zone.name}`,
               `    color: "${zone.color}"`,
+              `    elevation: ${zone.elevation}`,
               `    height: ${zone.height}`,
               `    day_opacity: ${zone.dayOpacity}`,
               `    night_opacity: ${zone.nightOpacity}`,
@@ -5040,6 +5082,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         id: zone.id,
         name: zone.name,
         color: zone.color || "#f8d66d",
+        elevation: this._formatCoordinate(this._zoneElevation(zone)),
         height: this._formatCoordinate(this._zoneHeight(zone)),
         dayOpacity: this._formatCoordinate(this._zoneOpacity(zone, "day")),
         nightOpacity: this._formatCoordinate(this._zoneOpacity(zone, "night")),
@@ -5068,7 +5111,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const errors = [];
     for (const url of urls) {
       try {
-        return await import(url);
+        return await this._importModule(url);
       } catch (error) {
         errors.push(`${url}: ${error?.message || error}`);
       }
@@ -5076,19 +5119,50 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     throw new Error(`${label} could not be loaded. ${errors.join(" | ")}`);
   }
 
+  async _importModule(url) {
+    return import(url);
+  }
+
   async _loadThreeModules() {
     if (this._threeModules) return this._threeModules;
     if (this._threeModulesPromise) return this._threeModulesPromise;
 
     this._threeModulesPromise = (async () => {
-      // Use esm.sh which rewrites bare specifiers internally (no import map needed).
-      const [THREE, { GLTFLoader }, { OBJLoader }, { OrbitControls }] = await Promise.all([
-        import("https://esm.sh/three@0.165.0"),
-        import("https://esm.sh/three@0.165.0/examples/jsm/loaders/GLTFLoader.js"),
-        import("https://esm.sh/three@0.165.0/examples/jsm/loaders/OBJLoader.js"),
-        import("https://esm.sh/three@0.165.0/examples/jsm/controls/OrbitControls.js"),
+      // Prefer the bundled same-origin module. This works through Home Assistant
+      // remote access and Companion WebViews without depending on a public CDN.
+      const bundleUrls = [
+        ...this._asList(this._config.three_bundle_urls),
+        ...this._asList(this._config.three_bundle_url),
+      ].filter((url, index, urls) => urls.indexOf(url) === index);
+      for (const url of bundleUrls) {
+        try {
+          const module = await this._importModule(url);
+          if (module?.GLTFLoader && module?.OBJLoader && module?.OrbitControls) {
+            this._threeModules = {
+              THREE: module,
+              GLTFLoader: module.GLTFLoader,
+              OBJLoader: module.OBJLoader,
+              OrbitControls: module.OrbitControls,
+            };
+            return this._threeModules;
+          }
+        } catch (_) {
+          // A local bundle may not be installed; continue to configured fallbacks.
+        }
+      }
+
+      const [THREE, gltfModule, objModule, controlsModule] = await Promise.all([
+        this._importFirst([...this._asList(this._config.three_urls), ...this._asList(this._config.three_url)], "Three.js"),
+        this._importFirst([...this._asList(this._config.gltf_loader_urls), ...this._asList(this._config.gltf_loader_url)], "GLTFLoader"),
+        this._importFirst([...this._asList(this._config.obj_loader_urls), ...this._asList(this._config.obj_loader_url)], "OBJLoader"),
+        this._importFirst([...this._asList(this._config.orbit_controls_urls), ...this._asList(this._config.orbit_controls_url)], "OrbitControls"),
       ]);
-      this._threeModules = { THREE, GLTFLoader, OBJLoader, OrbitControls };
+      this._threeModules = {
+        THREE,
+        GLTFLoader: gltfModule.GLTFLoader,
+        OBJLoader: objModule.OBJLoader,
+        OrbitControls: controlsModule.OrbitControls,
+      };
       return this._threeModules;
     })();
 
@@ -5967,6 +6041,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       return {
         id: zone.id,
         color: zone.color,
+        elevation: this._zoneElevation(zone),
         height: zone.height,
         dayOpacity: zone.dayOpacity,
         nightOpacity: zone.nightOpacity,
@@ -6794,9 +6869,9 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return result;
   }
 
-  _surfaceFloorLevel(THREE, zone, point, lift = 0.025) {
+  _surfaceFloorLevel(THREE, zone, point, lift = 0.025, targetLevelOverride = null) {
     const verticalAxis = this._coordinateMap()[this._verticalAxis()] || "y";
-    const targetLevel = this._zoneFloorLevel(zone);
+    const targetLevel = Number.isFinite(Number(targetLevelOverride)) ? Number(targetLevelOverride) : this._zoneFloorLevel(zone);
     const probe = {
       x: Number(point?.x) || 0,
       y: Number(point?.y) || 0,
@@ -6804,6 +6879,16 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     };
     probe[verticalAxis] = targetLevel + lift;
     return this._surfacePoint(THREE, probe, lift, targetLevel)[verticalAxis];
+  }
+
+  _floorGlowTargetLevel(zone, lightType, renderParams = {}) {
+    const floorLevel = this._zoneFloorLevel(zone);
+    if (lightType !== "spot" && lightType !== "lamp") return floorLevel;
+    const offset = Math.max(0, Number(renderParams.floor_glow_offset) || 0);
+    if (!offset) return floorLevel;
+    const verticalModelAxis = this._coordinateMap()[this._verticalAxis()] || "y";
+    const modelOffset = this._displayToModelVector(this._displayHeightVector(offset));
+    return floorLevel + (Number(modelOffset[verticalModelAxis]) || 0);
   }
 
   _displayToModelVector(vector) {
@@ -7163,9 +7248,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _zoneFloorLevel(zone) {
     const map = this._coordinateMap();
     const va = map[this._verticalAxis()];
-    const pts = zone.points || [];
-    if (!pts.length) return 0;
-    return pts.reduce((sum, p) => sum + (Number(p[va]) || 0), 0) / pts.length;
+    const displayPoint = { x: 0, y: 0, z: 0 };
+    displayPoint[this._verticalAxis()] = this._zoneElevation(zone);
+    const modelPoint = this._displayToModelPoint(displayPoint);
+    return Number(modelPoint[va]) || 0;
   }
 
   /** Parses a CSS color string (hex or rgb()) into {r, g, b} integers. */
@@ -7367,8 +7453,14 @@ class HomeAssistant3DFloorplan extends HTMLElement {
    * UV coordinates are computed so that (0.5, 0.5) = lightCenterAx0/Ax1 and
    * UV distance 1.0 = poolRadius from center — matching the pool shaders' dist check.
    */
-  _buildPolygonFloorMesh(THREE, zone, lightCenterAx0, lightCenterAx1, poolRadius, floorLift, material, renderOrder) {
-    const points = this._offsetZonePoints(zone.points || [], floorLift);
+  _buildPolygonFloorMesh(THREE, zone, lightCenterAx0, lightCenterAx1, poolRadius, surfaceLevel, material, renderOrder) {
+    const verticalModelAxis = this._coordinateMap()[this._verticalAxis()] || "y";
+    const points = (zone.points || []).map((point) => ({
+      x: Number(point.x),
+      y: Number(point.y),
+      z: Number(point.z),
+      [verticalModelAxis]: Number(surfaceLevel),
+    }));
     if (points.length < 3) return null;
 
     const floorAxes = this._floorAxes();
@@ -7414,7 +7506,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
     const map = this._coordinateMap();
     const verticalModelAxis = map[this._verticalAxis()];
-    const floorLevel = this._surfaceFloorLevel(THREE, zone, marker, 0.06); // just above floor pool
+    const targetLevel = this._floorGlowTargetLevel(zone, lightType, rp);
+    const floorLevel = this._surfaceFloorLevel(THREE, zone, marker, 0.06, targetLevel); // just above the selected glow surface
 
     // GI bounce: 3x pool radius, very low intensity warm wash
     const giRadius = lightRadius * Math.max(1, Math.min(6, Number(rp.gi_radius) || 3.2));
@@ -7485,9 +7578,10 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   _createFloorLightGlowMesh(THREE, zone, marker, lightType, lightRadius, color, brightness) {
     const map = this._coordinateMap();
     const verticalModelAxis = map[this._verticalAxis()];
-    const floorLevel = this._surfaceFloorLevel(THREE, zone, marker, 0.055);
     const radius = Math.max(0.1, Number(lightRadius) || 0.8);
     const rp = this._resolveRenderParams(marker);
+    const targetLevel = this._floorGlowTargetLevel(zone, lightType, rp);
+    const floorLevel = this._surfaceFloorLevel(THREE, zone, marker, 0.055, targetLevel);
     // For line types, directionalTargetFactor can return 0.08 (orientation points up to ceiling).
     // Use intensity directly so the floor brightness is controlled by render params.
     const isLineTypeCheck = lightType === "cove" || lightType === "linear";
@@ -8067,12 +8161,19 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const zone = this._zones[zoneId];
     if (!zone) return;
     const displayPoint = this._modelToDisplayPoint(point);
-    const modelPoint = this._zoneDisplayPointToModel(displayPoint);
-    zone.points = [...(zone.points || []), {
+    if (zone.elevation === null || zone.elevation === undefined || zone.elevation === "") {
+      const pickedElevation = Number(displayPoint[this._verticalAxis()]);
+      zone.elevation = Number.isFinite(pickedElevation) ? Number(pickedElevation.toFixed(4)) : 0;
+    }
+    const modelPoint = this._zoneDisplayPointToModel(displayPoint, this._zoneElevation(zone));
+    const storedPoint = {
       x: Math.round(modelPoint.x),
       y: Math.round(modelPoint.y),
       z: Math.round(modelPoint.z),
-    }];
+    };
+    const modelVerticalAxis = this._coordinateMap()[this._verticalAxis()] || "y";
+    storedPoint[modelVerticalAxis] = modelPoint[modelVerticalAxis];
+    zone.points = [...(zone.points || []), storedPoint];
     this._activeZoneId = zoneId;
     this._activeZonePointIndex = zone.points.length - 1;
     this._saveZones();

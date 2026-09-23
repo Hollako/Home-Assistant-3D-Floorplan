@@ -175,6 +175,7 @@ brightness_zones:
   - id: living-room
     name: Living Room
     color: "#f8d66d"
+    elevation: 0
     height: 280
     day_opacity: 0.50
     night_opacity: 1.00
@@ -190,6 +191,8 @@ brightness_zones:
       - x: 900.0000
         y: -1100.0000
 ```
+
+**Floor elevation** sets the zone's floor level on the configured vertical axis. New zones automatically use the elevation of the first clicked surface; it can also be adjusted manually. This keeps floor pools and room geometry on the correct storey in a multi-floor model. **Height** remains the distance from that floor level to the zone ceiling.
 
 **Illuminance sensor** - when enabled, the shade is driven dynamically by a lux sensor. Low lux approaches night shade; 300 lux reaches day shade; brighter reduces shade further. The sensor is selected from a searchable dropdown of all `sensor.*` and `input_number.*` entities. Falls back to `sun.sun` day/night when disabled or sensor is unavailable.
 
@@ -241,6 +244,7 @@ Every light marker has a full set of render parameters accessible in the **Advan
 ### Floor Pool
 | Param | Description |
 |---|---|
+| `floor_glow_offset` | Spot/Lamp only. Raises the flat glow surface above the zone floor for tables, counters, and platforms |
 | `floor_hotspot_size` | Size of the bright core relative to the main pool. Most effective on Spot, Lamp |
 | `floor_saturation` | Color saturation of the floor glow. 0 = grey, 1.5 = vivid |
 | `floor_outer_size` | Radius multiplier of the wide ambient scatter layer |

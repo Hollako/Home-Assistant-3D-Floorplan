@@ -6891,6 +6891,18 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     return floorLevel + (Number(modelOffset[verticalModelAxis]) || 0);
   }
 
+  _floorGlowSurfaceLevel(THREE, zone, marker, lightType, renderParams = {}, lift = 0.025) {
+    const targetLevel = this._floorGlowTargetLevel(zone, lightType, renderParams);
+    const hasExplicitOffset = (lightType === "spot" || lightType === "lamp")
+      && Math.max(0, Number(renderParams.floor_glow_offset) || 0) > 0;
+    if (hasExplicitOffset) {
+      // This control is an intentional flat-plane workaround. Respect its exact
+      // height instead of raycasting back to the nearest floor or model surface.
+      return targetLevel + (Number(lift) || 0);
+    }
+    return this._surfaceFloorLevel(THREE, zone, marker, lift, targetLevel);
+  }
+
   _displayToModelVector(vector) {
     const origin = this._displayToModelPoint({ x: 0, y: 0, z: 0 });
     const target = this._displayToModelPoint(vector);
@@ -7506,8 +7518,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
 
     const map = this._coordinateMap();
     const verticalModelAxis = map[this._verticalAxis()];
-    const targetLevel = this._floorGlowTargetLevel(zone, lightType, rp);
-    const floorLevel = this._surfaceFloorLevel(THREE, zone, marker, 0.06, targetLevel); // just above the selected glow surface
+    const floorLevel = this._floorGlowSurfaceLevel(THREE, zone, marker, lightType, rp, 0.06);
 
     // GI bounce: 3x pool radius, very low intensity warm wash
     const giRadius = lightRadius * Math.max(1, Math.min(6, Number(rp.gi_radius) || 3.2));
@@ -7580,8 +7591,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     const verticalModelAxis = map[this._verticalAxis()];
     const radius = Math.max(0.1, Number(lightRadius) || 0.8);
     const rp = this._resolveRenderParams(marker);
-    const targetLevel = this._floorGlowTargetLevel(zone, lightType, rp);
-    const floorLevel = this._surfaceFloorLevel(THREE, zone, marker, 0.055, targetLevel);
+    const floorLevel = this._floorGlowSurfaceLevel(THREE, zone, marker, lightType, rp, 0.055);
     // For line types, directionalTargetFactor can return 0.08 (orientation points up to ceiling).
     // Use intensity directly so the floor brightness is controlled by render params.
     const isLineTypeCheck = lightType === "cove" || lightType === "linear";

@@ -107,6 +107,34 @@ test("glow offsets do not affect cove or linear lights", () => {
   assert.equal(card._floorGlowTargetLevel(zone, "linear", { floor_glow_offset: 10 }), 6);
 });
 
+test("an explicit glow offset uses the exact requested plane height", () => {
+  const card = makeCard();
+  const zone = { elevation: 6, points: [] };
+  card._surfaceFloorLevel = () => {
+    throw new Error("explicit offsets must not snap back to a raycast surface");
+  };
+  assert.equal(
+    card._floorGlowSurfaceLevel(null, zone, { x: 0, y: 10, z: 0 }, "spot", { floor_glow_offset: 0.8 }, 0.05),
+    6.85,
+  );
+});
+
+test("zero glow offset keeps normal floor surface snapping", () => {
+  const card = makeCard();
+  const zone = { elevation: 6, points: [] };
+  card._surfaceFloorLevel = (_THREE, receivedZone, marker, lift, target) => {
+    assert.equal(receivedZone, zone);
+    assert.equal(marker.y, 10);
+    assert.equal(lift, 0.05);
+    assert.equal(target, 6);
+    return 6.1;
+  };
+  assert.equal(
+    card._floorGlowSurfaceLevel(null, zone, { x: 0, y: 10, z: 0 }, "spot", { floor_glow_offset: 0 }, 0.05),
+    6.1,
+  );
+});
+
 test("glow surface height is available only for spot and lamp editors", () => {
   const card = makeCard();
   const spot = card._renderParamSliders("light.spot", "spot", card._resolveRenderParams({ lightType: "spot" }), {});

@@ -18,7 +18,7 @@ await build({
   logLevel: "info",
 });
 
-copyFileSync("Home-Assistant-3D-Floorplan.js", "dist/Home-Assistant-3D-Floorplan.js");
+copyFileSync("src/Home-Assistant-3D-Floorplan.js", "dist/Home-Assistant-3D-Floorplan.js");
 
 console.log("Done -> dist/Home-Assistant-3D-Floorplan.js");
 console.log("Done -> dist/three.bundle.min.js");

@@ -42,7 +42,7 @@ globalThis.window = {
   customCards: [],
 };
 
-await import("../Home-Assistant-3D-Floorplan.js");
+await import("../src/Home-Assistant-3D-Floorplan.js");
 const Card = defined.get("home-assistant-3d-floorplan");
 const Editor = defined.get("home-assistant-3d-floorplan-editor");
 

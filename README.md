@@ -333,7 +333,7 @@ three_bundle_urls:
   - /local/three.bundle.min.js
 ```
 
-HACS installs both `Home-Assistant-3D-Floorplan.js` and `three.bundle.min.js` automatically from the repository's `dist` directory. No manual bundle copy is needed for HACS installations.
+HACS installs both `Home-Assistant-3D-Floorplan.js` and `three.bundle.min.js` automatically. The v2.12.3 release provides them as release assets; future releases can also install both files from the repository's `dist` directory. No manual bundle copy is needed for HACS installations.
 
 If those bundle paths are unavailable, the card falls back to the external CDN `esm.sh`:
 

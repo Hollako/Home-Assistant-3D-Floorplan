@@ -1,9 +1,9 @@
-// Build script: bundles Three.js + loaders + controls into a single browser-ready ES module.
+// Build the complete HACS dashboard package.
 // Run with: node build.js
-// Output:   dist/three.bundle.min.js  (copy to HA /local/ alongside the card)
+// Output:   dist/Home-Assistant-3D-Floorplan.js and dist/three.bundle.min.js
 
 import { build } from "esbuild";
-import { mkdirSync } from "fs";
+import { copyFileSync, mkdirSync } from "fs";
 
 mkdirSync("dist", { recursive: true });
 
@@ -18,4 +18,7 @@ await build({
   logLevel: "info",
 });
 
-console.log("Done → dist/three.bundle.min.js");
+copyFileSync("Home-Assistant-3D-Floorplan.js", "dist/Home-Assistant-3D-Floorplan.js");
+
+console.log("Done -> dist/Home-Assistant-3D-Floorplan.js");
+console.log("Done -> dist/three.bundle.min.js");

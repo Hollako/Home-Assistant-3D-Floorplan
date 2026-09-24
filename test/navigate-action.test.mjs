@@ -227,6 +227,20 @@ test("hash navigation_path is quoted in final YAML output", () => {
   assert.match(card._yamlExport(rows), /navigation_path: "#kitchen"/);
 });
 
+test("color thresholds are exported without crashing edit mode", () => {
+  const card = makeCard();
+  assert.deepEqual(card._yamlMarkerColorThresholdLines([
+    { value: 10, color: "#ff0000" },
+    { value: 20, color: "green" },
+  ], "    "), [
+    "    color_thresholds:",
+    "      - value: 10",
+    '        color: "#ff0000"',
+    "      - value: 20",
+    "        color: green",
+  ]);
+});
+
 test("interactive object editor offers navigate and its path field", () => {
   const editor = Object.create(Editor.prototype);
   editor._config = {

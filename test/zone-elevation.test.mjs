@@ -201,3 +201,17 @@ test("Three.js loading falls back to configured module URLs", async () => {
   assert.ok(calls.includes("/local/missing-bundle.js"));
   assert.ok(calls.includes("https://cdn.example/orbit.js"));
 });
+
+test("Three.js background colors discard unsupported alpha components", () => {
+  const card = makeCard();
+  assert.equal(card._opaqueThreeColorValue("rgba(25, 25, 25, 0.9)"), "rgb(25, 25, 25)");
+  assert.equal(card._opaqueThreeColorValue("rgb(25 25 25 / 90%)"), "rgb(25 25 25)");
+  assert.equal(card._opaqueThreeColorValue("#111827"), "#111827");
+});
+
+test("runtime model objects exclude incomplete editor rows", () => {
+  const card = makeCard();
+  const complete = { object_name: "CeilingFan", entity: "fan.living_room" };
+  assert.deepEqual(card._modelObjectConfigs([null, {}, { object_name: "" }, complete]), [complete]);
+  assert.deepEqual(card._modelObjectConfigs(null), []);
+});

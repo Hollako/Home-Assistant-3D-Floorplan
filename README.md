@@ -329,9 +329,11 @@ When installed through HACS, the card first loads the bundled Three.js build fro
 
 ```yaml
 three_bundle_urls:
-  - /hacsfiles/Home-Assistant-3D-Floorplan/dist/three.bundle.min.js
+  - /hacsfiles/Home-Assistant-3D-Floorplan/three.bundle.min.js
   - /local/three.bundle.min.js
 ```
+
+HACS installs both `Home-Assistant-3D-Floorplan.js` and `three.bundle.min.js` automatically from the repository's `dist` directory. No manual bundle copy is needed for HACS installations.
 
 If those bundle paths are unavailable, the card falls back to the external CDN `esm.sh`:
 

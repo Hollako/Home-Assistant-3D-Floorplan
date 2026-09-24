@@ -1765,51 +1765,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       });
     });
 
-    this.shadowRoot.querySelectorAll("[data-add-color-threshold]").forEach((element) => {
-      element.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this._addColorThreshold(event.currentTarget.dataset.addColorThreshold);
-      });
-    });
-
-    this.shadowRoot.querySelectorAll("[data-remove-color-threshold]").forEach((element) => {
-      element.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this._removeColorThreshold(event.currentTarget.dataset.removeColorThreshold, Number(event.currentTarget.dataset.thresholdIndex));
-      });
-    });
-
-    this.shadowRoot.querySelectorAll("[data-color-threshold-value]").forEach((element) => {
-      element.addEventListener("pointerdown", (event) => event.stopPropagation());
-      element.addEventListener("change", (event) => {
-        this._updateColorThreshold(event.currentTarget.dataset.colorThresholdValue, Number(event.currentTarget.dataset.thresholdIndex), {
-          value: event.currentTarget.value,
-        });
-      });
-    });
-
-    this.shadowRoot.querySelectorAll("[data-color-threshold-color]").forEach((element) => {
-      element.addEventListener("pointerdown", (event) => event.stopPropagation());
-      element.addEventListener("input", (event) => {
-        this._syncColorThresholdText(event.currentTarget);
-      });
-      element.addEventListener("change", (event) => {
-        this._updateColorThreshold(event.currentTarget.dataset.colorThresholdColor, Number(event.currentTarget.dataset.thresholdIndex), {
-          color: event.currentTarget.value,
-        });
-      });
-    });
-
-    this.shadowRoot.querySelectorAll("[data-color-threshold-text]").forEach((element) => {
-      element.addEventListener("pointerdown", (event) => event.stopPropagation());
-      element.addEventListener("change", (event) => {
-        this._updateColorThreshold(event.currentTarget.dataset.colorThresholdText, Number(event.currentTarget.dataset.thresholdIndex), {
-          color: event.currentTarget.value,
-        });
-      });
-    });
+    this._bindColorThresholdControls(this.shadowRoot);
 
     this.shadowRoot.querySelectorAll("[data-marker-action]").forEach((element) => {
       element.addEventListener("pointerdown", (event) => event.stopPropagation());
@@ -4183,6 +4139,54 @@ class HomeAssistant3DFloorplan extends HTMLElement {
     });
   }
 
+  _bindColorThresholdControls(rootElement) {
+    rootElement.querySelectorAll("[data-add-color-threshold]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._addColorThreshold(event.currentTarget.dataset.addColorThreshold);
+      });
+    });
+
+    rootElement.querySelectorAll("[data-remove-color-threshold]").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._removeColorThreshold(event.currentTarget.dataset.removeColorThreshold, Number(event.currentTarget.dataset.thresholdIndex));
+      });
+    });
+
+    rootElement.querySelectorAll("[data-color-threshold-value]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        this._updateColorThreshold(event.currentTarget.dataset.colorThresholdValue, Number(event.currentTarget.dataset.thresholdIndex), {
+          value: event.currentTarget.value,
+        });
+      });
+    });
+
+    rootElement.querySelectorAll("[data-color-threshold-color]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("input", (event) => {
+        this._syncColorThresholdText(event.currentTarget);
+      });
+      element.addEventListener("change", (event) => {
+        this._updateColorThreshold(event.currentTarget.dataset.colorThresholdColor, Number(event.currentTarget.dataset.thresholdIndex), {
+          color: event.currentTarget.value,
+        });
+      });
+    });
+
+    rootElement.querySelectorAll("[data-color-threshold-text]").forEach((element) => {
+      element.addEventListener("pointerdown", (event) => event.stopPropagation());
+      element.addEventListener("change", (event) => {
+        this._updateColorThreshold(event.currentTarget.dataset.colorThresholdText, Number(event.currentTarget.dataset.thresholdIndex), {
+          color: event.currentTarget.value,
+        });
+      });
+    });
+  }
+
   _bindDeviceRowControls(rowElement) {
     rowElement.querySelectorAll("[data-remove]").forEach((element) => {
       element.addEventListener("click", (event) => {
@@ -4231,6 +4235,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
         this._updateMarkerDisplay(event.currentTarget.dataset.markerDisplay, event.currentTarget.value);
       });
     });
+
+    this._bindColorThresholdControls(rowElement);
 
     rowElement.querySelectorAll("[data-marker-action]").forEach((element) => {
       element.addEventListener("pointerdown", (event) => event.stopPropagation());

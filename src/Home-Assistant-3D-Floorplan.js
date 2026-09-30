@@ -154,6 +154,8 @@ class HomeAssistant3DFloorplan extends HTMLElement {
       marker_size: 18,
       show_labels: true,
       show_entity_state: true,
+      show_toolbar: true,
+      show_compass: true,
       nudge_step: 1,
       ...config,
     };
@@ -1412,7 +1414,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
               : ""
           }
           <main>
-            <div class="map-toolbar">
+            <div class="map-toolbar"${this._config.show_toolbar === false ? ' style="display:none"' : ""}>
               <div class="toolbar-title">${this._escape(floorTitle)}</div>
               ${
                 this._hasMultipleFloors()
@@ -4721,6 +4723,7 @@ class HomeAssistant3DFloorplan extends HTMLElement {
   }
 
   _modelCompassTemplate() {
+    if (this._config.show_compass === false) return "";
     const hasDefaultView = Boolean(this._modelDefaultViews?.[this._activeFloorId || "default"]);
     return `
       <div class="model-compass" aria-label="3D view compass">
@@ -11099,6 +11102,8 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
             ${this._checkboxInput("allow_edit", "Allow Admin Edit Mode", true)}
             ${this._checkboxInput("show_labels", "Show Marker Names", true)}
             ${this._checkboxInput("show_entity_state", "Use Entity State Colors", true)}
+            ${this._checkboxInput("show_toolbar", "Show Top Toolbar", true)}
+            ${this._checkboxInput("show_compass", "Show View Compass", true)}
             ${this._numberInput("marker_size", "Marker Size", 18, 8, 64, 1)}
             ${this._numberInput("nudge_step", "Nudge Step", 1, 0.01, 100, 0.01)}
           </div>
@@ -11553,6 +11558,8 @@ class HomeAssistant3DFloorplanEditor extends HTMLElement {
       "allow_edit",
       "show_labels",
       "show_entity_state",
+      "show_toolbar",
+      "show_compass",
       "marker_size",
       "nudge_step",
       "marker_tap_action",
